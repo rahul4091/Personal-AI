@@ -1,0 +1,13 @@
+{
+  "name": "devos-agent",
+  "version": "1.0.0",
+  "description": "Personal AI Command Center — DevOS Agent",
+  "scripts": {
+    "dev": "concurrently \"npm run server\" \"npm run client\"",
+    "server": "npm run dev --prefix server",
+    "client": "npm run dev --prefix client"
+  },
+  "dependencies": {
+    "concurrently": "^8.2.2"
+  }
+}
