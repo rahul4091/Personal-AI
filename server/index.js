@@ -21,7 +21,15 @@ import auth       from './services/auth.js';
 const app  = express();
 const PORT = process.env.PORT ?? 3001;
 
-app.use(cors({ origin: 'http://localhost:5173' }));
+const allowedOrigins = [
+  'http://localhost:5173',
+  'http://localhost:3001',
+  process.env.RAILWAY_PUBLIC_DOMAIN
+    ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+    : null,
+].filter(Boolean);
+
+app.use(cors({ origin: allowedOrigins, credentials: true }));
 app.use(express.json());
 
 // ─── Health check ─────────────────────────────────────────────────────────────
@@ -52,7 +60,10 @@ app.get('/api/auth/google/callback', async (req, res) => {
     const client      = auth.createOAuth2Client();
     const { tokens }  = await client.getToken(req.query.code);
     auth.saveTokens(tokens);
-    res.redirect(`${process.env.APP_URL ?? 'http://localhost:5173'}?connected=true`);
+    const frontendURL = process.env.RAILWAY_PUBLIC_DOMAIN
+      ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+      : (process.env.APP_URL ?? 'http://localhost:5173');
+    res.redirect(`${frontendURL}?connected=true`);
   } catch (err) {
     console.error('[auth/google/callback]', err.message);
     res.status(500).send('Authentication failed. Please try again.');

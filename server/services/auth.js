@@ -17,10 +17,14 @@ const SCOPES = [
 ];
 
 export function createOAuth2Client() {
+  const baseURL = process.env.RAILWAY_PUBLIC_DOMAIN
+    ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+    : 'http://localhost:3001';
+
   return new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
     process.env.GOOGLE_CLIENT_SECRET,
-    'http://localhost:3001/api/auth/google/callback'
+    `${baseURL}/api/auth/google/callback`
   );
 }
 
