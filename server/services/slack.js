@@ -15,7 +15,9 @@ export async function sendDM(text) {
     const res = await client.chat.postMessage({ channel: USER_ID, text });
     return res.ts;
   } catch (err) {
-    console.error('[slack] sendDM:', err.message);
+    const code = err.data?.error ?? err.code ?? '';
+    console.error(`[slack] sendDM failed${code ? ' (' + code + ')' : ''}: ${err.message}`);
+    if (err.data) console.error('[slack] sendDM response:', JSON.stringify(err.data));
     return null;
   }
 }
@@ -95,7 +97,9 @@ export async function sendDigest(digest) {
     const res = await client.chat.postMessage({ channel: USER_ID, blocks, text: 'DevOS Morning Digest' });
     return res.ts;
   } catch (err) {
-    console.error('[slack] sendDigest:', err.message);
+    const code = err.data?.error ?? err.code ?? '';
+    console.error(`[slack] sendDigest failed${code ? ' (' + code + ')' : ''}: ${err.message}`);
+    if (err.data) console.error('[slack] sendDigest response:', JSON.stringify(err.data));
     return null;
   }
 }

@@ -129,6 +129,35 @@ export function isVIP(emailAddress) {
   );
 }
 
+// ─── Activity log ─────────────────────────────────────────────────────────────
+
+export function logActivity(intent, params = {}, status = 'success', error = null) {
+  const mem = load();
+  if (!mem.activityLog) mem.activityLog = [];
+
+  const { title, to, repo, date, days, time, startDate, endDate } = params;
+  const slim = Object.fromEntries(
+    Object.entries({ title, to, repo, date, days, time, startDate, endDate })
+      .filter(([, v]) => v != null)
+  );
+
+  mem.activityLog.push({
+    at:     new Date().toISOString(),
+    intent,
+    params: slim,
+    status,
+    ...(error ? { error } : {}),
+  });
+
+  if (mem.activityLog.length > 500) mem.activityLog = mem.activityLog.slice(-500);
+  save(mem);
+}
+
+export function getActivityLog(limit = 50) {
+  const mem = load();
+  return (mem.activityLog ?? []).slice(-limit).reverse();
+}
+
 export default {
   getMemory,
   addVIP,
@@ -139,4 +168,6 @@ export default {
   isVIP,
   saveFact,
   buildContextSummary,
+  logActivity,
+  getActivityLog,
 };

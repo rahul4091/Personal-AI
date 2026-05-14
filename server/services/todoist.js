@@ -69,4 +69,33 @@ export async function updateTaskStatus(taskId, status) {
   }
 }
 
-export default { createTask, getTasks, updateTaskStatus, isConfigured };
+export async function updateTask(taskId, patches = {}) {
+  if (!isConfigured()) return null;
+  try {
+    const body = {};
+    if (patches.title)   body.content    = patches.title;
+    if (patches.dueDate) body.due_string = patches.dueDate;
+    const res = await fetch(`${BASE}/tasks/${taskId}`, {
+      method: 'POST', headers: headers(), body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(`Todoist ${res.status}: ${await res.text()}`);
+    return formatTask(await res.json());
+  } catch (err) {
+    console.error('[todoist] updateTask:', err.message);
+    throw err;
+  }
+}
+
+export async function deleteTask(taskId) {
+  if (!isConfigured()) return null;
+  try {
+    const res = await fetch(`${BASE}/tasks/${taskId}`, { method: 'DELETE', headers: headers() });
+    if (!res.ok) throw new Error(`Todoist ${res.status}: ${await res.text()}`);
+    return { deleted: true, id: taskId };
+  } catch (err) {
+    console.error('[todoist] deleteTask:', err.message);
+    throw err;
+  }
+}
+
+export default { createTask, getTasks, updateTaskStatus, updateTask, deleteTask, isConfigured };

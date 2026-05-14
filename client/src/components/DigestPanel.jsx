@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 
-export default function DigestPanel() {
+export default function DigestPanel({ refreshKey }) {
   const [digest,  setDigest]  = useState(null);
   const [loading, setLoading] = useState(false);
 
@@ -10,6 +10,14 @@ export default function DigestPanel() {
       .then(d => { if (d) setDigest(d); })
       .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    if (!refreshKey) return;
+    fetch('/api/digest/latest')
+      .then(r => r.json())
+      .then(d => { if (d) setDigest(d); })
+      .catch(() => {});
+  }, [refreshKey]);
 
   async function runDigest() {
     setLoading(true);
@@ -82,14 +90,11 @@ export default function DigestPanel() {
               <div style={{ fontSize: 11, fontWeight: 500, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 6 }}>Comms</div>
               {digest.comms.pending.slice(0, 3).map((e, i) => card(
                 <>
-                  <div style={{ display: 'flex', gap: 6, marginBottom: 4 }}>
-                    <span className={`tag tag-${e.priority === 'P1' ? 'danger' : 'warn'}`}>{e.priority}</span>
-                    <span style={{ fontSize: 11, color: 'var(--muted)' }}>{e.from}</span>
-                  </div>
+                  <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 4 }}>{e.from}</div>
                   <div style={{ fontWeight: 500 }}>{e.subject}</div>
                   <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 2 }}>{e.intent}</div>
                 </>,
-                e.priority === 'P1' ? 'var(--danger)' : 'var(--warning)'
+                'var(--border)'
               ))}
             </div>
           )}

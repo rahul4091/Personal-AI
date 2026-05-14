@@ -17,10 +17,16 @@ export default function App() {
   const [health,         setHealth]         = useState({});
   const [taskRefreshKey,     setTaskRefreshKey]     = useState(0);
   const [calendarRefreshKey, setCalendarRefreshKey] = useState(0);
+  const [githubRefreshKey,   setGithubRefreshKey]   = useState(0);
+  const [emailRefreshKey,    setEmailRefreshKey]    = useState(0);
+  const [digestRefreshKey,   setDigestRefreshKey]   = useState(0);
 
   function handleChatAction(panel) {
     if (panel === 'tasks')    setTaskRefreshKey(k => k + 1);
     if (panel === 'calendar') setCalendarRefreshKey(k => k + 1);
+    if (panel === 'github')   setGithubRefreshKey(k => k + 1);
+    if (panel === 'comms')    setEmailRefreshKey(k => k + 1);
+    if (panel === 'digest')   setDigestRefreshKey(k => k + 1);
   }
 
   useEffect(() => {
@@ -96,11 +102,11 @@ export default function App() {
 
         {/* Main panel — keep all mounted so data isn't re-fetched on every tab switch */}
         <main style={{ overflow: 'auto', padding: 16, position: 'relative' }}>
-          <div style={{ display: view === 'digest'   ? 'block' : 'none' }}><DigestPanel /></div>
-          <div style={{ display: view === 'comms'    ? 'block' : 'none' }}><EmailPanel connected={connected} /></div>
+          <div style={{ display: view === 'digest'   ? 'block' : 'none' }}><DigestPanel refreshKey={digestRefreshKey} /></div>
+          <div style={{ display: view === 'comms'    ? 'block' : 'none' }}><EmailPanel connected={connected} refreshKey={emailRefreshKey} /></div>
           <div style={{ display: view === 'calendar' ? 'block' : 'none' }}><CalendarPanel connected={connected} refreshKey={calendarRefreshKey} /></div>
           <div style={{ display: view === 'tasks'    ? 'block' : 'none' }}><TaskPanel refreshKey={taskRefreshKey} /></div>
-          <div style={{ display: view === 'github'   ? 'block' : 'none' }}><GitHubPanel health={health} /></div>
+          <div style={{ display: view === 'github'   ? 'block' : 'none' }}><GitHubPanel health={health} refreshKey={githubRefreshKey} /></div>
           <div style={{ display: view === 'linkedin' ? 'block' : 'none' }}><LinkedInPanel health={health} /></div>
           <div style={{ display: view === 'slack'    ? 'block' : 'none' }}><SlackPanel health={health} /></div>
           <div style={{ display: view === 'chat'     ? 'block' : 'none' }}><ChatPanel onAction={handleChatAction} /></div>

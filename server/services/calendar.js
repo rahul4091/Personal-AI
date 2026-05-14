@@ -64,19 +64,66 @@ export async function createEvent(title, startISO, durationMinutes = 60, descrip
   try {
     const start = new Date(startISO);
     const end   = new Date(start.getTime() + durationMinutes * 60 * 1000);
+    const tz    = process.env.USER_TIMEZONE ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
 
     const res = await cal().events.insert({
       calendarId: 'primary',
       requestBody: {
         summary:     title,
         description,
-        start: { dateTime: start.toISOString(), timeZone: 'UTC' },
-        end:   { dateTime: end.toISOString(),   timeZone: 'UTC' },
+        start: { dateTime: start.toISOString(), timeZone: tz },
+        end:   { dateTime: end.toISOString(),   timeZone: tz },
       },
     });
     return formatEvent(res.data);
   } catch (err) {
     console.error('[calendar] createEvent:', err.message);
+    throw err;
+  }
+}
+
+// ─── Create recurring event ───────────────────────────────────────────────────
+// days: array of ISO weekday numbers 1=Mon … 7=Sun
+// time: "HH:MM" (24-hour, local time)
+
+const RRULE_DAY = { 1: 'MO', 2: 'TU', 3: 'WE', 4: 'TH', 5: 'FR', 6: 'SA', 7: 'SU' };
+const ISO_TO_JS  = { 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 0 }; // JS getDay() uses 0=Sun
+
+export async function createRecurringEvent(title, days, time, durationMinutes = 60, description = '') {
+  if (!days?.length) throw new Error('At least one day is required');
+  if (!/^\d{1,2}:\d{2}$/.test(time)) throw new Error('time must be HH:MM');
+
+  const [hh, mm]  = time.split(':').map(Number);
+  const tz        = process.env.USER_TIMEZONE ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const byDay     = days.map(d => RRULE_DAY[d]).join(',');
+  const jsDays    = days.map(d => ISO_TO_JS[d]);
+
+  // Find the next calendar day that matches one of the selected weekdays
+  const start = new Date();
+  start.setHours(hh, mm, 0, 0);
+  if (start <= new Date()) start.setDate(start.getDate() + 1); // already passed today → tomorrow
+
+  let tries = 0;
+  while (!jsDays.includes(start.getDay()) && tries++ < 7) {
+    start.setDate(start.getDate() + 1);
+  }
+
+  const end = new Date(start.getTime() + durationMinutes * 60 * 1000);
+
+  try {
+    const res = await cal().events.insert({
+      calendarId: 'primary',
+      requestBody: {
+        summary:    title,
+        description,
+        start:      { dateTime: start.toISOString(), timeZone: tz },
+        end:        { dateTime: end.toISOString(),   timeZone: tz },
+        recurrence: [`RRULE:FREQ=WEEKLY;BYDAY=${byDay}`],
+      },
+    });
+    return formatEvent(res.data);
+  } catch (err) {
+    console.error('[calendar] createRecurringEvent:', err.message);
     throw err;
   }
 }
@@ -164,4 +211,64 @@ Return a JSON object:
   }
 }
 
-export default { getUpcoming, getWeekEvents, createEvent, scanConflicts, blockFocusTime, generateMeetingBrief };
+// ─── Find event by title (for chat commands that don't know the ID) ───────────
+
+async function findByTitle(title) {
+  const events = await getUpcoming(30);
+  const q = title.toLowerCase();
+  return events.find(e => e.title.toLowerCase().includes(q)) ?? null;
+}
+
+// ─── Delete event ─────────────────────────────────────────────────────────────
+
+export async function deleteEvent(idOrTitle) {
+  try {
+    let eventId = idOrTitle;
+    let title   = idOrTitle;
+    // Heuristic: Google event IDs are long alphanumeric strings
+    if (!/^[a-zA-Z0-9_]{15,}$/.test(idOrTitle)) {
+      const ev = await findByTitle(idOrTitle);
+      if (!ev) throw new Error(`No upcoming event found matching "${idOrTitle}"`);
+      eventId = ev.id;
+      title   = ev.title;
+    }
+    await cal().events.delete({ calendarId: 'primary', eventId });
+    return { deleted: true, id: eventId, title };
+  } catch (err) {
+    console.error('[calendar] deleteEvent:', err.message);
+    throw err;
+  }
+}
+
+// ─── Update event ─────────────────────────────────────────────────────────────
+// patches: { title?, date?, duration? }
+
+export async function updateEvent(idOrTitle, patches = {}) {
+  try {
+    let eventId = idOrTitle;
+    let current = null;
+    if (!/^[a-zA-Z0-9_]{15,}$/.test(idOrTitle)) {
+      current = await findByTitle(idOrTitle);
+      if (!current) throw new Error(`No upcoming event found matching "${idOrTitle}"`);
+      eventId = current.id;
+    }
+
+    const tz          = process.env.USER_TIMEZONE ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const requestBody = {};
+    if (patches.title) requestBody.summary = patches.title;
+    if (patches.date) {
+      const start  = new Date(patches.date);
+      const durMin = patches.duration ?? (current ? Math.round((new Date(current.end) - new Date(current.start)) / 60000) : 60);
+      requestBody.start = { dateTime: start.toISOString(), timeZone: tz };
+      requestBody.end   = { dateTime: new Date(start.getTime() + durMin * 60000).toISOString(), timeZone: tz };
+    }
+
+    const res = await cal().events.patch({ calendarId: 'primary', eventId, requestBody });
+    return formatEvent(res.data);
+  } catch (err) {
+    console.error('[calendar] updateEvent:', err.message);
+    throw err;
+  }
+}
+
+export default { getUpcoming, getWeekEvents, createEvent, createRecurringEvent, deleteEvent, updateEvent, scanConflicts, blockFocusTime, generateMeetingBrief };

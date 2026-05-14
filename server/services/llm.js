@@ -25,7 +25,7 @@ const TASK_ROUTING = {
 };
 
 const MODELS = {
-  gemini: 'gemini-1.5-flash',      // 1,500 req/day free vs 250 for 2.5-flash
+  gemini: 'gemini-2.0-flash',       // gemini-1.5-flash deprecated May 2026
   groq:   'llama-3.1-8b-instant',  // 20,000 req/day free vs 6,000 for 70b
   ollama: 'llama3.2',
 };
@@ -69,9 +69,19 @@ function getClient(provider) {
 
 async function callProvider(provider, params, json) {
   const client = getClient(provider);
-  const res    = await client.chat.completions.create({ ...params, model: MODELS[provider] });
-  const c      = res.choices[0].message.content;
-  if (json) return JSON.parse(c.replace(/```json\n?|\n?```/g, '').trim());
+  // Gemini's OpenAI compat layer returns 400 on response_format for some prompts;
+  // rely on system prompt + regex cleanup instead
+  const { response_format, ...rest } = params;
+  const callParams = provider === 'gemini' ? rest : params;
+  const res = await client.chat.completions.create({ ...callParams, model: MODELS[provider] });
+  const c   = res.choices[0].message.content;
+  if (json) {
+    try {
+      return JSON.parse(c.replace(/```json\n?|\n?```/g, '').trim());
+    } catch {
+      throw new Error(`[${provider}] invalid JSON in response: ${c.slice(0, 120)}`);
+    }
+  }
   return c;
 }
 
@@ -104,9 +114,10 @@ export async function call(messages, options = {}) {
     } catch (err) {
       const errCode      = err.code ?? err.cause?.code;
       const rateLimited  = err.status === 429;
+      const notFound     = err.status === 404;
       const offline      = errCode === 'ECONNREFUSED' || errCode === 'ENOTFOUND';
       const missingKey   = errCode === 'MISSING_API_KEY';
-      if (!rateLimited && !offline && !missingKey) throw err;
+      if (!rateLimited && !offline && !missingKey && !notFound) throw err;
 
       if (rateLimited) {
         const match  = err.message.match(/try again in (\d+(?:\.\d+)?)\s*(ms|s)/i);
@@ -151,14 +162,36 @@ export async function chat(userMessage, systemPrompt = 'You are a helpful person
   );
 }
 
+const INTENT_GUIDE = `
+Intent guide — pick the single closest match per action:
+- add_task: add/create a task or to-do item
+- update_task: mark a task done/in-progress/complete
+- get_tasks: list, show or check tasks
+- create_note: save/add/create a note, idea, or piece of writing to Notion
+- get_notes: list or show notes
+- draft_email: compose/write/draft an email (do NOT send)
+- send_email: send an email immediately
+- get_emails: show/check inbox or emails
+- create_event: schedule/add/create a calendar event or meeting
+- get_calendar: show/check upcoming events or schedule
+- create_issue: file/create/open a GitHub issue or bug report
+- get_issues: list/show GitHub issues
+- get_prs: show/check pull requests
+- get_trello: show/check Trello cards or board
+- run_digest: run or trigger the full morning/daily digest briefing
+- draft_linkedin: write/draft a LinkedIn post from a source article or topic
+- save_memory: remember/save a personal fact or preference
+- general_chat: anything that does not clearly match the intents above
+`.trim();
+
 // classify() — returns structured JSON matching schema
 export async function classify(text, schema) {
   return call(
     [
-      { role: 'system', content: `JSON only. Schema:\n${schema}` },
+      { role: 'system', content: `JSON only. Omit null/empty params.\n${INTENT_GUIDE}\nSchema:\n${schema}` },
       { role: 'user',   content: text },
     ],
-    { taskType: 'classify', json: true, maxTokens: 300 }
+    { taskType: 'classify', json: true, maxTokens: 800 }
   );
 }
 
