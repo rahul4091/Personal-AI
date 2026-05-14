@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>DevOS Agent — UI Kit</title>
+<link rel="stylesheet" href="../../colors_and_type.css"/>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-sans);
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  button { font-family: inherit; }
+  button:hover { background: var(--bg); }
+  button.primary:hover { opacity: .9; }
+  input:focus, textarea:focus { outline: none; border-color: var(--accent); }
+  a { color: var(--info); text-decoration: none; }
+</style>
+</head>
+<body>
+
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script type="text/babel" src="primitives.jsx"></script>
+<script type="text/babel" src="TopBar.jsx"></script>
+<script type="text/babel" src="Sidebar.jsx"></script>
+<script type="text/babel" src="DigestView.jsx"></script>
+<script type="text/babel" src="CommsView.jsx"></script>
+<script type="text/babel" src="CalendarView.jsx"></script>
+<script type="text/babel" src="TasksView.jsx"></script>
+<script type="text/babel" src="ChatView.jsx"></script>
+
+<script type="text/babel">
+const { useState } = React;
+
+function ComingSoon({ name, dot }) {
+  return (
+    <div style={{ paddingTop: 60, textAlign: "center", color: "var(--muted)" }}>
+      <span className="pv-dot" style={{
+        width: 14, height: 14, borderRadius: "50%",
+        background: dot, display: "inline-block", marginBottom: 12,
+      }} />
+      <div style={{ fontSize: 14, color: "var(--text)", marginBottom: 6 }}>{name}</div>
+      <div style={{ fontSize: 12 }}>Integration panel — not included in this UI kit demo.</div>
+    </div>
+  );
+}
+
+function App() {
+  const [view, setView] = useState("digest");
+  const [connected, setConnected] = useState(true);
+  const health = { gemini: true, groq: true, notion: true, github: true, slack: true, trello: false };
+
+  return (
+    <div style={{ display: "grid", gridTemplateRows: "48px 1fr", minHeight: "100vh" }}
+         data-screen-label="DevOS Agent — main app">
+      <TopBar connected={connected} health={health} />
+
+      <div style={{ display: "grid", gridTemplateColumns: "200px 1fr", overflow: "hidden" }}>
+        <Sidebar view={view} setView={setView} connected={connected} setConnected={setConnected} />
+
+        <main style={{ overflow: "auto", padding: 16, position: "relative" }}>
+          <div style={{ display: view === "digest"   ? "block" : "none" }}><DigestView /></div>
+          <div style={{ display: view === "comms"    ? "block" : "none" }}><CommsView /></div>
+          <div style={{ display: view === "calendar" ? "block" : "none" }}><CalendarView /></div>
+          <div style={{ display: view === "tasks"    ? "block" : "none" }}><TasksView /></div>
+          <div style={{ display: view === "chat"     ? "block" : "none" }}><ChatView /></div>
+          <div style={{ display: view === "github"   ? "block" : "none" }}><ComingSoon name="GitHub" dot="#24292f" /></div>
+          <div style={{ display: view === "linkedin" ? "block" : "none" }}><ComingSoon name="LinkedIn" dot="#0A66C2" /></div>
+          <div style={{ display: view === "slack"    ? "block" : "none" }}><ComingSoon name="Slack" dot="#611f69" /></div>
+        </main>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+
+</body>
+</html>

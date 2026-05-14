@@ -1,0 +1,185 @@
+/* ============================================================
+   DevOS Agent — Colors & Type
+   Single source of truth for tokens used across UI kits & slides.
+   Mirrors client/src/index.css from the source repo, expanded
+   with semantic type styles + tag palette + shadow tokens.
+   ============================================================ */
+
+:root {
+  /* ---- Surfaces ---- */
+  --bg:        #f9f9f8;   /* app background — warm off-white */
+  --surface:   #ffffff;   /* cards, sidebar, top bar */
+  --border:    #e5e4e0;   /* hairline (drawn at 0.5px) */
+
+  /* ---- Text ---- */
+  --text:      #1a1a18;   /* primary copy */
+  --muted:     #6b6b68;   /* secondary copy, metadata */
+  --hint:      #a0a09d;   /* timestamps, counts, faint labels */
+
+  /* ---- Semantic ---- */
+  --accent:    #1D9E75;   /* DevOS green — primary brand */
+  --danger:    #D85A30;   /* P1, blockers, errors */
+  --warning:   #BA7517;   /* P2, conflicts, breaks */
+  --info:      #378ADD;   /* Focus blocks, links, info */
+  --success:   #639922;   /* Done states */
+
+  /* ---- Sidebar / panel dots (one per surface) ---- */
+  --dot-digest:   #888780;
+  --dot-comms:    #1D9E75;
+  --dot-calendar: #7F77DD;
+  --dot-tasks:    #D85A30;
+  --dot-github:   #24292f;
+  --dot-linkedin: #0A66C2;
+  --dot-slack:    #611f69;
+  --dot-chat:     #378ADD;
+  --dot-study:    #8B5CF6;
+
+  /* ---- Tag pairs (bg / fg) ---- */
+  --tag-danger-bg:  #FAECE7;  --tag-danger-fg:  #712B13;
+  --tag-warn-bg:    #FAEEDA;  --tag-warn-fg:   #633806;
+  --tag-success-bg: #EAF3DE;  --tag-success-fg: #27500A;
+  --tag-info-bg:    #E6F1FB;  --tag-info-fg:    #0C447C;
+  --tag-gray-bg:    #F1EFE8;  --tag-gray-fg:    #444441;
+
+  /* ---- Radii ---- */
+  --radius:    8px;
+  --radius-lg: 12px;
+  --radius-sm: 4px;
+  --radius-pill: 999px;
+
+  /* ---- Spacing scale (px) ---- */
+  --space-1: 2px;
+  --space-2: 4px;
+  --space-3: 6px;
+  --space-4: 8px;
+  --space-5: 10px;
+  --space-6: 12px;
+  --space-7: 14px;
+  --space-8: 16px;
+  --space-10: 20px;
+
+  /* ---- Border weights ----
+     DevOS uses HAIRLINE borders on every surface. 0.5px renders
+     as sub-pixel on retina, ~1px on standard. Never thicker. */
+  --border-hairline: 0.5px solid var(--border);
+  --border-accent-3: 3px solid var(--accent); /* priority bar */
+
+  /* ---- Elevation — extremely subtle, mostly absent ---- */
+  --shadow-none: none;
+  --shadow-1: 0 1px 2px rgba(20,20,20,0.04);
+  --shadow-2: 0 2px 8px rgba(20,20,20,0.06);
+
+  /* ---- Type ---- */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+               "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas,
+               "Liberation Mono", monospace;
+
+  /* type sizes (small + tight — DevOS is information-dense) */
+  --fs-xs:   10px;
+  --fs-sm:   11px;
+  --fs-md:   12px;
+  --fs-base: 13px;   /* default body */
+  --fs-lg:   14px;   /* large body */
+  --fs-h2:   16px;   /* panel headers */
+  --fs-h1:   20px;   /* expanded email subject, big numbers */
+  --fs-stat: 24px;   /* digest stat numerals */
+
+  --lh-tight:  1.3;
+  --lh-normal: 1.5;
+  --lh-loose:  1.7;
+
+  --tracking-eyebrow: 0.05em;  /* uppercase labels */
+
+  /* timing */
+  --t-fast:   0.12s;
+  --t-normal: 0.2s;
+}
+
+/* ============================================================
+   Semantic type styles
+   Use these as classes OR mix-ins. Match the exact specs used
+   inside the React components.
+   ============================================================ */
+
+.t-h1 {
+  font-family: var(--font-sans);
+  font-size: var(--fs-h1);
+  font-weight: 400;          /* DevOS uses LIGHT headings */
+  color: var(--text);
+  line-height: var(--lh-tight);
+}
+
+.t-h2 {                       /* "Today's digest", "Chat", panel titles */
+  font-family: var(--font-sans);
+  font-size: var(--fs-h2);
+  font-weight: 500;
+  color: var(--text);
+}
+
+.t-stat {                     /* big digest numerals */
+  font-family: var(--font-sans);
+  font-size: var(--fs-stat);
+  font-weight: 500;
+  line-height: 1;
+}
+
+.t-body {
+  font-family: var(--font-sans);
+  font-size: var(--fs-base);
+  line-height: var(--lh-normal);
+  color: var(--text);
+}
+
+.t-body-strong {
+  font-family: var(--font-sans);
+  font-size: var(--fs-base);
+  font-weight: 500;
+  color: var(--text);
+}
+
+.t-meta {                     /* "from / to" lines, sub-info */
+  font-family: var(--font-sans);
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
+.t-hint {                     /* timestamps, counts, "Generated at..." */
+  font-family: var(--font-sans);
+  font-size: var(--fs-sm);
+  color: var(--hint);
+}
+
+.t-eyebrow {                  /* uppercase section labels: "COMMS", "NAVIGATION" */
+  font-family: var(--font-sans);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-eyebrow);
+}
+
+.t-tag {                      /* tags / chips */
+  display: inline-block;
+  font-family: var(--font-sans);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  padding: 2px 7px;
+  border-radius: var(--radius-sm);
+}
+
+.t-code {
+  font-family: var(--font-mono);
+  font-size: var(--fs-md);
+}
+
+/* ============================================================
+   Tag variants — direct ports from index.css
+   ============================================================ */
+.tag         { display: inline-block; font-size: var(--fs-xs); font-weight: 500;
+               padding: 2px 7px; border-radius: var(--radius-sm); }
+.tag-danger  { background: var(--tag-danger-bg);  color: var(--tag-danger-fg); }
+.tag-warn    { background: var(--tag-warn-bg);    color: var(--tag-warn-fg); }
+.tag-success { background: var(--tag-success-bg); color: var(--tag-success-fg); }
+.tag-info    { background: var(--tag-info-bg);    color: var(--tag-info-fg); }
+.tag-gray    { background: var(--tag-gray-bg);    color: var(--tag-gray-fg); }

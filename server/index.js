@@ -52,7 +52,7 @@ app.get('/api/auth/google/callback', async (req, res) => {
     const client      = auth.createOAuth2Client();
     const { tokens }  = await client.getToken(req.query.code);
     auth.saveTokens(tokens);
-    res.redirect('http://localhost:5173?connected=true');
+    res.redirect(`${process.env.APP_URL ?? 'http://localhost:5173'}?connected=true`);
   } catch (err) {
     console.error('[auth/google/callback]', err.message);
     res.status(500).send('Authentication failed. Please try again.');
@@ -881,6 +881,17 @@ cron.schedule('0 7 * * *', async () => {
   } catch (err) {
     console.error('[cron/calendar]', err.message);
   }
+});
+
+// ─── Serve React build in production ─────────────────────────────────────────
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const clientBuild = path.join(__dirname, '..', 'client', 'dist');
+
+app.use(express.static(clientBuild));
+
+app.get(/^(?!\/api).*/, (req, res) => {
+  res.sendFile(path.join(clientBuild, 'index.html'));
 });
 
 // ─── Start server ─────────────────────────────────────────────────────────────

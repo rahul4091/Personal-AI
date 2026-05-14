@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>Elevation</title>
+<!-- Shared preview card scaffolding. Each preview file includes it directly. -->
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    background: #f9f9f8;
+    color: #1a1a18;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  body { padding: 16px; }
+  .pv-grid { display: grid; gap: 8px; }
+  .pv-row  { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .pv-swatch {
+    border: 0.5px solid #e5e4e0;
+    border-radius: 8px;
+    background: #fff;
+    overflow: hidden;
+    display: flex; flex-direction: column;
+  }
+  .pv-swatch .chip { height: 38px; }
+  .pv-swatch .meta { padding: 6px 8px; }
+  .pv-swatch .name { font-size: 11px; font-weight: 500; color: #1a1a18; }
+  .pv-swatch .hex  { font-size: 10px; color: #6b6b68;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .pv-card {
+    background: #fff;
+    border: 0.5px solid #e5e4e0;
+    border-radius: 8px;
+    padding: 10px 14px;
+  }
+  .pv-eyebrow {
+    font-size: 11px; font-weight: 500; color: #6b6b68;
+    text-transform: uppercase; letter-spacing: .05em;
+  }
+  .pv-tag {
+    display: inline-block; font-size: 10px; font-weight: 500;
+    padding: 2px 7px; border-radius: 4px;
+  }
+  .pv-tag-danger  { background: #FAECE7; color: #712B13; }
+  .pv-tag-warn    { background: #FAEEDA; color: #633806; }
+  .pv-tag-success { background: #EAF3DE; color: #27500A; }
+  .pv-tag-info    { background: #E6F1FB; color: #0C447C; }
+  .pv-tag-gray    { background: #F1EFE8; color: #444441; }
+  .pv-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+  .pv-btn {
+    cursor: pointer;
+    border: 0.5px solid #e5e4e0;
+    background: #fff;
+    color: #1a1a18;
+    border-radius: 8px;
+    padding: 6px 12px;
+    font-size: 12px;
+    font-family: inherit;
+  }
+  .pv-btn-primary { background: #1D9E75; color: #fff; border-color: #1D9E75; }
+  .pv-btn-danger  { background: #D85A30; color: #fff; border-color: #D85A30; }
+  .pv-input {
+    border: 0.5px solid #e5e4e0; border-radius: 8px;
+    padding: 8px 12px; font-size: 13px; background: #fff;
+    color: #1a1a18; font-family: inherit; width: 100%;
+  }
+  .pv-input:focus { outline: none; border-color: #1D9E75; }
+  .pv-muted { color: #6b6b68; }
+  .pv-hint  { color: #a0a09d; }
+  .pv-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+</style>
+
+<style>body { padding: 16px; }</style>
+</head>
+<body>
+
+<div class="pv-row" style="gap:18px">
+  <div style="background:#fff;border:0.5px solid #e5e4e0;border-radius:8px;padding:14px 16px;width:160px">
+    <div style="font-size:12px;font-weight:500">none</div>
+    <div class="pv-hint" style="font-size:11px">all cards</div>
+  </div>
+  <div style="background:#fff;border:0.5px solid #e5e4e0;border-radius:8px;padding:14px 16px;width:160px;box-shadow:0 1px 2px rgba(20,20,20,0.04)">
+    <div style="font-size:12px;font-weight:500">shadow-1</div>
+    <div class="pv-hint" style="font-size:11px">popovers (optional)</div>
+  </div>
+  <div style="background:#fff;border:0.5px solid #e5e4e0;border-radius:8px;padding:14px 16px;width:160px;box-shadow:0 2px 8px rgba(20,20,20,0.06)">
+    <div style="font-size:12px;font-weight:500">shadow-2</div>
+    <div class="pv-hint" style="font-size:11px">menus (optional)</div>
+  </div>
+</div>
+<div style="margin-top:10px;font-size:11px;color:#6b6b68">Source uses NO shadows. Cards rely on borders.</div>
+</body>
+</html>

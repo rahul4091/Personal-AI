@@ -3,9 +3,11 @@
   "version": "1.0.0",
   "description": "Personal AI Command Center — DevOS Agent",
   "scripts": {
-    "dev": "concurrently \"npm run server\" \"npm run client\"",
+    "dev":    "concurrently \"npm run server\" \"npm run client\"",
     "server": "npm run dev --prefix server",
-    "client": "npm run dev --prefix client"
+    "client": "npm run dev --prefix client",
+    "build":  "npm run build --prefix client",
+    "start":  "node server/index.js"
   },
   "dependencies": {
     "concurrently": "^8.2.2"
