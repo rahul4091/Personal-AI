@@ -61,12 +61,10 @@ export function isConnected() {
   }
 }
 
-export function getAuthUrl() {
-  return createOAuth2Client().generateAuthUrl({
-    access_type: 'offline',
-    scope: SCOPES,
-    prompt: 'consent',
-  });
+export function getAuthUrl(state = '') {
+  const opts = { access_type: 'offline', scope: SCOPES, prompt: 'consent' };
+  if (state) opts.state = state;
+  return createOAuth2Client().generateAuthUrl(opts);
 }
 
 export default { createOAuth2Client, getAuthClient, saveTokens, isConnected, getAuthUrl };

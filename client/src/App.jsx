@@ -1,13 +1,16 @@
 import { useState, useEffect } from 'react';
-import ChatPanel     from './components/ChatPanel.jsx';
-import EmailPanel    from './components/EmailPanel.jsx';
-import CalendarPanel from './components/CalendarPanel.jsx';
-import TaskPanel     from './components/TaskPanel.jsx';
-import DigestPanel   from './components/DigestPanel.jsx';
-import LinkedInPanel from './components/LinkedInPanel.jsx';
-import GitHubPanel   from './components/GitHubPanel.jsx';
-import SlackPanel    from './components/SlackPanel.jsx';
-import TopBar        from './components/TopBar.jsx';
+import ChatPanel       from './components/ChatPanel.jsx';
+import EmailPanel      from './components/EmailPanel.jsx';
+import CalendarPanel   from './components/CalendarPanel.jsx';
+import TaskPanel       from './components/TaskPanel.jsx';
+import DigestPanel     from './components/DigestPanel.jsx';
+import LinkedInPanel   from './components/LinkedInPanel.jsx';
+import GitHubPanel     from './components/GitHubPanel.jsx';
+import SlackPanel      from './components/SlackPanel.jsx';
+import TopBar          from './components/TopBar.jsx';
+import AuthPage        from './AuthPage.jsx';
+import OnboardingWizard from './OnboardingWizard.jsx';
+import SettingsPage     from './SettingsPage.jsx';
 
 const VIEWS = ['digest', 'comms', 'calendar', 'tasks', 'content', 'chat'];
 
@@ -21,6 +24,30 @@ export default function App() {
   const [emailRefreshKey,    setEmailRefreshKey]    = useState(0);
   const [digestRefreshKey,   setDigestRefreshKey]   = useState(0);
 
+  // ─── Auth state ─────────────────────────────────────────────────────────────
+  const [user,         setUser]         = useState(null);
+  const [authChecked,  setAuthChecked]  = useState(false);
+  const [showOnboarding, setShowOnboarding] = useState(false);
+
+  function handleAuth(newUser, isSignup) {
+    setUser(newUser);
+    if (isSignup) {
+      localStorage.setItem('devos_onboarding', 'true');
+      setShowOnboarding(true);
+    }
+  }
+
+  function handleOnboardingComplete() {
+    localStorage.removeItem('devos_onboarding');
+    setShowOnboarding(false);
+  }
+
+  function handleLogout() {
+    localStorage.removeItem('devos_token');
+    localStorage.removeItem('devos_onboarding');
+    setUser(null);
+  }
+
   function handleChatAction(panel) {
     if (panel === 'tasks')    setTaskRefreshKey(k => k + 1);
     if (panel === 'calendar') setCalendarRefreshKey(k => k + 1);
@@ -30,17 +57,57 @@ export default function App() {
   }
 
   useEffect(() => {
+    // ── 1. Verify stored token ───────────────────────────────────────────────
+    const token = localStorage.getItem('devos_token');
+    if (token) {
+      fetch('/api/users/me', { headers: { Authorization: `Bearer ${token}` } })
+        .then(r => r.ok ? r.json() : null)
+        .then(u => {
+          if (u) {
+            setUser(u);
+            if (localStorage.getItem('devos_onboarding') === 'true') setShowOnboarding(true);
+          } else {
+            localStorage.removeItem('devos_token');
+            localStorage.removeItem('devos_onboarding');
+          }
+          setAuthChecked(true);
+        })
+        .catch(() => setAuthChecked(true));
+    } else {
+      setAuthChecked(true);
+    }
+
+    // ── 2. Health check ──────────────────────────────────────────────────────
     fetch('/api/health')
       .then(r => r.json())
       .then(d => { setHealth(d); setConnected(d.google); })
       .catch(() => {});
 
-    // Check for OAuth redirect
+    // ── 3. Google OAuth redirect ─────────────────────────────────────────────
     if (window.location.search.includes('connected=true')) {
       setConnected(true);
-      window.history.replaceState({}, '', '/');
+      // Don't clear the URL here — OnboardingWizard handles it when active.
+      if (localStorage.getItem('devos_onboarding') !== 'true') {
+        window.history.replaceState({}, '', '/');
+      }
+    }
+    // Settings-specific OAuth return (google_connected=true → handled by SettingsPage)
+    if (window.location.search.includes('google_connected=true')) {
+      setConnected(true);
+      setView('settings');
     }
   }, []);
+
+  // ─── Auth gate ──────────────────────────────────────────────────────────────
+  if (!authChecked) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', color: 'var(--hint)', fontSize: 'var(--fs-base)' }}>
+        Loading…
+      </div>
+    );
+  }
+  if (!user) return <AuthPage onAuth={handleAuth} />;
+  if (showOnboarding) return <OnboardingWizard user={user} onComplete={handleOnboardingComplete} />;
 
   const navItems = [
     { id: 'digest',   label: "Today's digest", dot: '#888780' },
@@ -51,6 +118,7 @@ export default function App() {
     { id: 'linkedin', label: 'LinkedIn',   dot: '#0A66C2' },
     { id: 'slack',    label: 'Slack',      dot: '#611f69' },
     { id: 'chat',     label: 'Chat',       dot: '#378ADD' },
+    { id: 'settings', label: 'Settings',   dot: '#888780' },
   ];
 
   return (
@@ -64,7 +132,7 @@ export default function App() {
 
           <div style={{ padding: '4px 8px', fontSize: 10, fontWeight: 500, color: 'var(--hint)', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 4 }}>Navigation</div>
 
-          {navItems.map(n => (
+          {navItems.filter(n => n.id !== 'settings').map(n => (
             <button
               key={n.id}
               onClick={() => setView(n.id)}
@@ -84,13 +152,33 @@ export default function App() {
             </button>
           ))}
 
-          <div style={{ marginTop: 'auto', padding: '8px' }}>
+          <div style={{ marginTop: 'auto' }}>
+            <div style={{ height: '0.5px', background: 'var(--border)', margin: '4px 0' }} />
+            <button
+              onClick={() => setView('settings')}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 8,
+                padding: '7px 10px', margin: '1px 4px',
+                borderRadius: 'var(--radius)',
+                border: 'none', width: 'calc(100% - 8px)',
+                background: view === 'settings' ? 'var(--bg)' : 'transparent',
+                color: view === 'settings' ? 'var(--text)' : 'var(--muted)',
+                fontWeight: view === 'settings' ? 500 : 400,
+                textAlign: 'left',
+              }}
+            >
+              <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#888780', flexShrink: 0 }} />
+              Settings
+            </button>
+
             {!connected && (
-              <a href="/api/auth/google">
-                <button className="primary" style={{ width: '100%', fontSize: 12 }}>
-                  Connect Google
-                </button>
-              </a>
+              <div style={{ padding: '6px 8px 2px' }}>
+                <a href="/api/auth/google">
+                  <button className="primary" style={{ width: '100%', fontSize: 12 }}>
+                    Connect Google
+                  </button>
+                </a>
+              </div>
             )}
             {connected && (
               <div style={{ fontSize: 11, color: 'var(--success)', textAlign: 'center', padding: '6px 0' }}>
@@ -110,6 +198,7 @@ export default function App() {
           <div style={{ display: view === 'linkedin' ? 'block' : 'none' }}><LinkedInPanel health={health} /></div>
           <div style={{ display: view === 'slack'    ? 'block' : 'none' }}><SlackPanel health={health} /></div>
           <div style={{ display: view === 'chat'     ? 'block' : 'none' }}><ChatPanel onAction={handleChatAction} /></div>
+          {view === 'settings' && <SettingsPage user={user} onLogout={handleLogout} />}
         </main>
 
       </div>

@@ -1,0 +1,17 @@
+[
+  {
+    "id": 1778825991678,
+    "username": "rahul",
+    "email": "rahulcpawar3107@gmail.com",
+    "passwordHash": "$2a$12$88lhXKClXr1MYmFTDIRTeOvJfRsLIfV2TKeC4UPKhCSfTdkEVkLg.",
+    "createdAt": "2026-05-15T06:19:51.678Z"
+  },
+  {
+    "id": 1778829581744,
+    "username": "rahul31",
+    "email": "rahulcpawar3107@gmail.com",
+    "passwordHash": "$2a$12$KAWHM0SmvLVMVBGh60Z0ruUlP5HmPiKLNN.LgRfeh39cWvqSKTole",
+    "isActive": true,
+    "createdAt": "2026-05-15T07:19:41.744Z"
+  }
+]

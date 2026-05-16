@@ -17,6 +17,10 @@ import trello     from './services/trello.js';
 import content    from './services/content.js';
 import todoist    from './services/todoist.js';
 import auth       from './services/auth.js';
+import { initDB } from './services/db.js';
+import * as userService from './services/users.js';
+import * as integrations from './services/integrations.js';
+import OpenAI from 'openai';
 
 const app  = express();
 const PORT = process.env.PORT ?? 3001;
@@ -52,7 +56,8 @@ app.get('/api/health', (req, res) => {
 // ─── Google OAuth2 ────────────────────────────────────────────────────────────
 
 app.get('/api/auth/google', (req, res) => {
-  res.redirect(auth.getAuthUrl());
+  const state = req.query.from === 'settings' ? 'from:settings' : '';
+  res.redirect(auth.getAuthUrl(state));
 });
 
 app.get('/api/auth/google/callback', async (req, res) => {
@@ -63,15 +68,300 @@ app.get('/api/auth/google/callback', async (req, res) => {
     const frontendURL = process.env.RAILWAY_PUBLIC_DOMAIN
       ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
       : (process.env.APP_URL ?? 'http://localhost:5173');
-    res.redirect(`${frontendURL}?connected=true`);
+    const fromSettings = (req.query.state ?? '').includes('from:settings');
+    const returnPath   = fromSettings ? '/settings?google_connected=true' : '/?connected=true';
+    res.redirect(`${frontendURL}${returnPath}`);
   } catch (err) {
     console.error('[auth/google/callback]', err.message);
     res.status(500).send('Authentication failed. Please try again.');
   }
 });
 
+// Returns the Gmail address of the globally connected Google account
+app.get('/api/auth/google/email', async (req, res) => {
+  if (!auth.isConnected()) return res.json({ connected: false, email: null });
+  try {
+    const { google: googleapis } = await import('googleapis');
+    const client = auth.getAuthClient();
+    const gmail  = googleapis.gmail({ version: 'v1', auth: client });
+    const profile = await gmail.users.getProfile({ userId: 'me' });
+    res.json({ connected: true, email: profile.data.emailAddress });
+  } catch (err) {
+    res.json({ connected: true, email: null });
+  }
+});
+
 app.get('/api/auth/status', (req, res) => {
   res.json({ connected: auth.isConnected() });
+});
+
+// ─── User account routes ───────────────────────────────────────────────────────
+
+app.post('/api/auth/signup', async (req, res) => {
+  try {
+    const { username, password, email } = req.body;
+    const user  = await userService.createUser(username, password, email);
+    const token = userService.signToken(user);
+    res.status(201).json({ token, user: { id: user.id, username: user.username, email: user.email } });
+  } catch (err) {
+    const isConflict = err.message.includes('already') || err.code === '23505';
+    res.status(isConflict ? 409 : 400).json({ error: err.message });
+  }
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { username, password } = req.body;
+    const user  = await userService.loginUser(username, password);
+    const token = userService.signToken(user);
+    res.json({ token, user: { id: user.id, username: user.username, email: user.email } });
+  } catch (err) {
+    res.status(401).json({ error: err.message });
+  }
+});
+
+app.get('/api/users/me', async (req, res) => {
+  const auth_header = req.headers.authorization;
+  if (!auth_header?.startsWith('Bearer ')) return res.status(401).json({ error: 'No token' });
+  try {
+    const payload = userService.verifyToken(auth_header.slice(7));
+    const user    = await userService.getUserById(payload.userId);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    res.json({ id: user.id, username: user.username, email: user.email });
+  } catch {
+    res.status(401).json({ error: 'Invalid or expired token' });
+  }
+});
+
+// ─── Auth middleware ───────────────────────────────────────────────────────────
+// Used by any route that requires a logged-in user.
+
+function requireAuth(req, res, next) {
+  const header = req.headers.authorization;
+  if (!header?.startsWith('Bearer ')) return res.status(401).json({ error: 'Authentication required' });
+  try {
+    req.user = userService.verifyToken(header.slice(7)); // { userId, username, iat, exp }
+    next();
+  } catch {
+    res.status(401).json({ error: 'Invalid or expired token' });
+  }
+}
+
+// ─── Integration key routes ────────────────────────────────────────────────────
+// These routes let the frontend save, list, and delete per-user API keys.
+// All values are encrypted before touching the database.
+
+// List which integrations are configured — returns metadata for the settings UI
+app.get('/api/integrations', requireAuth, async (req, res) => {
+  try {
+    res.json(await integrations.listKeysWithMeta(req.user.userId));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Save (or overwrite) a single key
+// Body: { service, keyName, keyValue }
+app.post('/api/integrations', requireAuth, async (req, res) => {
+  try {
+    const { service, keyName, keyValue } = req.body;
+    if (!service?.trim())   return res.status(400).json({ error: 'service is required' });
+    if (!keyName?.trim())   return res.status(400).json({ error: 'keyName is required' });
+    if (!keyValue?.trim())  return res.status(400).json({ error: 'keyValue is required' });
+    await integrations.saveKey(req.user.userId, service.trim(), keyName.trim(), keyValue.trim());
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Delete a single key
+app.delete('/api/integrations/:service/:keyName', requireAuth, async (req, res) => {
+  try {
+    await integrations.deleteKey(req.user.userId, req.params.service, req.params.keyName);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Disconnect all keys for a service
+app.delete('/api/integrations/:service', requireAuth, async (req, res) => {
+  try {
+    await integrations.deleteService(req.user.userId, req.params.service);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Credential test + save endpoint ──────────────────────────────────────────
+// Tests the supplied credentials against the real API, and saves them only on success.
+
+app.post('/api/credentials/test/:service', requireAuth, async (req, res) => {
+  const { service } = req.params;
+  const body        = req.body ?? {};
+  const uid         = req.user.userId;
+
+  try {
+    switch (service) {
+
+      case 'gemini': {
+        if (!body.key?.trim()) return res.status(400).json({ ok: false, error: 'API key is required' });
+        const client = new OpenAI({
+          apiKey:  body.key.trim(),
+          baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/',
+        });
+        await client.chat.completions.create({
+          model:    'gemini-2.0-flash',
+          messages: [{ role: 'user', content: 'Reply with the single word OK' }],
+          max_tokens: 5,
+        });
+        await integrations.saveKey(uid, 'gemini', 'GEMINI_API_KEY', body.key.trim());
+        return res.json({ ok: true });
+      }
+
+      case 'groq': {
+        if (!body.key?.trim()) return res.status(400).json({ ok: false, error: 'API key is required' });
+        const client = new OpenAI({
+          apiKey:  body.key.trim(),
+          baseURL: 'https://api.groq.com/openai/v1',
+        });
+        await client.chat.completions.create({
+          model:    'llama-3.1-8b-instant',
+          messages: [{ role: 'user', content: 'Reply with the single word OK' }],
+          max_tokens: 5,
+        });
+        await integrations.saveKey(uid, 'groq', 'GROQ_API_KEY', body.key.trim());
+        return res.json({ ok: true });
+      }
+
+      case 'notion': {
+        const { apiKey, taskDbId, notesDbId } = body;
+        if (!apiKey?.trim()) return res.status(400).json({ ok: false, error: 'API key is required' });
+        // Test API key
+        const meResp = await fetch('https://api.notion.com/v1/users/me', {
+          headers: { 'Authorization': `Bearer ${apiKey.trim()}`, 'Notion-Version': '2022-06-28' },
+        });
+        if (!meResp.ok) {
+          const e = await meResp.json().catch(() => ({}));
+          return res.status(400).json({ ok: false, error: e.message || 'Invalid Notion API key' });
+        }
+        const notionUser = await meResp.json();
+        // Test DB IDs if provided
+        for (const [label, dbId] of [['Tasks', taskDbId], ['Notes', notesDbId]]) {
+          if (!dbId?.trim()) continue;
+          const dbResp = await fetch(`https://api.notion.com/v1/databases/${dbId.trim()}`, {
+            headers: { 'Authorization': `Bearer ${apiKey.trim()}`, 'Notion-Version': '2022-06-28' },
+          });
+          if (!dbResp.ok) {
+            const e = await dbResp.json().catch(() => ({}));
+            return res.status(400).json({ ok: false, error: `${label} database not found. Make sure you've shared it with your integration. ${e.message || ''}`.trim() });
+          }
+        }
+        // All passed — save
+        await integrations.saveKey(uid, 'notion', 'NOTION_API_KEY', apiKey.trim());
+        if (taskDbId?.trim())  await integrations.saveKey(uid, 'notion', 'NOTION_TASKS_DB_ID',  taskDbId.trim());
+        if (notesDbId?.trim()) await integrations.saveKey(uid, 'notion', 'NOTION_NOTES_DB_ID', notesDbId.trim());
+        return res.json({ ok: true, meta: { userName: notionUser.name } });
+      }
+
+      case 'github': {
+        const { token, owner, repo } = body;
+        if (!token?.trim()) return res.status(400).json({ ok: false, error: 'Token is required' });
+        const resp = await fetch('https://api.github.com/user', {
+          headers: { 'Authorization': `token ${token.trim()}`, 'Accept': 'application/vnd.github.v3+json' },
+        });
+        if (!resp.ok) return res.status(400).json({ ok: false, error: 'Invalid GitHub token' });
+        const ghUser = await resp.json();
+        await integrations.saveKey(uid, 'github', 'GITHUB_TOKEN', token.trim());
+        if (owner?.trim()) await integrations.saveKey(uid, 'github', 'GITHUB_OWNER', owner.trim());
+        if (repo?.trim())  await integrations.saveKey(uid, 'github', 'GITHUB_REPO',  repo.trim());
+        return res.json({ ok: true, meta: { username: ghUser.login } });
+      }
+
+      case 'trello': {
+        const { apiKey, token, boardId } = body;
+        if (!apiKey?.trim() || !token?.trim()) return res.status(400).json({ ok: false, error: 'API key and token are required' });
+        const resp = await fetch(
+          `https://api.trello.com/1/members/me?key=${encodeURIComponent(apiKey.trim())}&token=${encodeURIComponent(token.trim())}&boards=open`
+        );
+        if (!resp.ok) return res.status(400).json({ ok: false, error: 'Invalid Trello API key or token' });
+        const trelloUser = await resp.json();
+        if (boardId?.trim()) {
+          const boards = trelloUser.boards ?? [];
+          const found  = boards.find(b => b.id === boardId.trim() || b.shortLink === boardId.trim());
+          if (!found) {
+            const names = boards.map(b => b.name).join(', ') || 'none';
+            return res.status(400).json({ ok: false, error: `Board not found. Your boards: ${names}` });
+          }
+          await integrations.saveKey(uid, 'trello', 'TRELLO_BOARD_ID', boardId.trim());
+        }
+        await integrations.saveKey(uid, 'trello', 'TRELLO_API_KEY', apiKey.trim());
+        await integrations.saveKey(uid, 'trello', 'TRELLO_TOKEN',   token.trim());
+        return res.json({ ok: true, meta: { fullName: trelloUser.fullName } });
+      }
+
+      case 'slack': {
+        const { botToken, userId: slackUserId } = body;
+        if (!botToken?.trim()) return res.status(400).json({ ok: false, error: 'Bot token is required' });
+        const resp = await fetch('https://slack.com/api/auth.test', {
+          method:  'POST',
+          headers: { 'Authorization': `Bearer ${botToken.trim()}`, 'Content-Type': 'application/json' },
+        });
+        const data = await resp.json();
+        if (!data.ok) return res.status(400).json({ ok: false, error: data.error || 'Invalid Slack token' });
+        await integrations.saveKey(uid, 'slack', 'SLACK_BOT_TOKEN', botToken.trim());
+        if (slackUserId?.trim()) await integrations.saveKey(uid, 'slack', 'SLACK_USER_ID', slackUserId.trim());
+        return res.json({ ok: true, meta: { teamName: data.team, botName: data.user } });
+      }
+
+      case 'linkedin': {
+        const { webhookUrl } = body;
+        if (!webhookUrl?.trim()) return res.status(400).json({ ok: false, error: 'Webhook URL is required' });
+        if (!webhookUrl.trim().startsWith('https://')) {
+          return res.status(400).json({ ok: false, error: 'Webhook URL must start with https://' });
+        }
+        await integrations.saveKey(uid, 'linkedin', 'LINKEDIN_WEBHOOK_URL', webhookUrl.trim());
+        return res.json({ ok: true });
+      }
+
+      default:
+        return res.status(400).json({ ok: false, error: `Unknown service: ${service}` });
+    }
+  } catch (err) {
+    console.error(`[credentials/test/${service}]`, err.message);
+    return res.status(400).json({ ok: false, error: err.message });
+  }
+});
+
+// ─── Account management routes ─────────────────────────────────────────────────
+
+app.put('/api/users/me/email', requireAuth, async (req, res) => {
+  try {
+    await userService.updateEmail(req.user.userId, req.body.email);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.put('/api/users/me/password', requireAuth, async (req, res) => {
+  try {
+    await userService.updatePassword(req.user.userId, req.body.currentPassword, req.body.newPassword);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.delete('/api/users/me', requireAuth, async (req, res) => {
+  try {
+    await userService.deleteUser(req.user.userId, req.body.password);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
 });
 
 // ─── Multi-action schema ──────────────────────────────────────────────────────
@@ -907,6 +1197,7 @@ app.get(/^(?!\/api).*/, (req, res) => {
 
 // ─── Start server ─────────────────────────────────────────────────────────────
 
+await initDB();
 app.listen(PORT, () => {
   console.log(`\n🚀 DevOS Agent server running on http://localhost:${PORT}`);
   console.log(`   Gemini: ${process.env.GEMINI_API_KEY ? '✓' : '✗ missing'}`);
