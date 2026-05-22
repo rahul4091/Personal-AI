@@ -38,12 +38,21 @@ app.use(express.json());
 
 // ─── Health check ─────────────────────────────────────────────────────────────
 
-app.get('/api/health', requireAuth, (req, res) => {
+app.get('/api/health', requireAuth, async (req, res) => {
+  const creds = await getUserCreds(req.user.userId);
   const googleConnectedId = auth.getConnectedUserId();
   const googleForUser = auth.isConnected() && (googleConnectedId === null || googleConnectedId === req.user.userId);
   res.json({
-    ok:      true,
-    google:  googleForUser,
+    ok:       true,
+    google:   googleForUser,
+    gemini:   !!(creds.GEMINI_API_KEY),
+    groq:     !!(creds.GROQ_API_KEY),
+    notion:   !!(creds.NOTION_API_KEY),
+    slack:    !!(creds.SLACK_BOT_TOKEN),
+    github:   github.isConfigured(creds),
+    trello:   !!(creds.TRELLO_API_KEY),
+    todoist:  !!(creds.TODOIST_API_KEY),
+    linkedin: !!(creds.LINKEDIN_WEBHOOK_URL),
   });
 });
 
