@@ -1302,9 +1302,50 @@ app.get(/^(?!\/api).*/, (req, res) => {
   res.sendFile(path.join(clientBuild, 'index.html'));
 });
 
+// ─── Startup: migrate env var credentials into DB for the first (admin) user ──
+// Runs every boot but never overwrites credentials already saved via Settings.
+
+async function migrateEnvCredentials() {
+  const adminUser = await userService.getUserById(1).catch(() => null);
+  if (!adminUser) return;
+
+  const candidates = [
+    ['github',   'GITHUB_TOKEN',          process.env.GITHUB_TOKEN],
+    ['github',   'GITHUB_OWNER',          process.env.GITHUB_OWNER],
+    ['github',   'GITHUB_REPO',           process.env.GITHUB_REPO],
+    ['github',   'GITHUB_REPOS',          process.env.GITHUB_REPOS],
+    ['notion',   'NOTION_API_KEY',        process.env.NOTION_API_KEY],
+    ['notion',   'NOTION_TASKS_DB_ID',    process.env.NOTION_TASKS_DB_ID],
+    ['notion',   'NOTION_NOTES_DB_ID',    process.env.NOTION_NOTES_DB_ID],
+    ['slack',    'SLACK_BOT_TOKEN',       process.env.SLACK_BOT_TOKEN],
+    ['slack',    'SLACK_USER_ID',         process.env.SLACK_USER_ID],
+    ['todoist',  'TODOIST_API_KEY',       process.env.TODOIST_API_KEY],
+    ['trello',   'TRELLO_API_KEY',        process.env.TRELLO_API_KEY],
+    ['trello',   'TRELLO_TOKEN',          process.env.TRELLO_TOKEN],
+    ['trello',   'TRELLO_BOARD_ID',       process.env.TRELLO_BOARD_ID],
+    ['gemini',   'GEMINI_API_KEY',        process.env.GEMINI_API_KEY],
+    ['groq',     'GROQ_API_KEY',          process.env.GROQ_API_KEY],
+    ['linkedin', 'LINKEDIN_WEBHOOK_URL',  process.env.LINKEDIN_WEBHOOK_URL],
+  ];
+
+  let count = 0;
+  for (const [service, keyName, value] of candidates) {
+    if (!value) continue;
+    const existing = await integrations.getKey(adminUser.id, service, keyName).catch(() => null);
+    if (!existing) {
+      await integrations.saveKey(adminUser.id, service, keyName, value);
+      count++;
+    }
+  }
+  if (count > 0) {
+    console.log(`[migration] Imported ${count} env credential(s) → user "${adminUser.username}" (ID ${adminUser.id})`);
+  }
+}
+
 // ─── Start server ─────────────────────────────────────────────────────────────
 
 await initDB();
+await migrateEnvCredentials();
 app.listen(PORT, () => {
   console.log(`\n🚀 DevOS Agent server running on http://localhost:${PORT}`);
   console.log(`   Gemini: ${process.env.GEMINI_API_KEY ? '✓' : '✗ missing'}`);
