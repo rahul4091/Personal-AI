@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { apiFetch } from './api.js';
 import ChatPanel       from './components/ChatPanel.jsx';
 import EmailPanel      from './components/EmailPanel.jsx';
 import CalendarPanel   from './components/CalendarPanel.jsx';
@@ -24,13 +25,14 @@ export default function App() {
   const [emailRefreshKey,    setEmailRefreshKey]    = useState(0);
   const [digestRefreshKey,   setDigestRefreshKey]   = useState(0);
 
-  // ─── Auth state ─────────────────────────────────────────────────────────────
-  const [user,         setUser]         = useState(null);
-  const [authChecked,  setAuthChecked]  = useState(false);
+  const [user,           setUser]           = useState(null);
+  const [authChecked,    setAuthChecked]    = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(false);
+  const [isLoggedIn,     setIsLoggedIn]     = useState(false);
 
   function handleAuth(newUser, isSignup) {
     setUser(newUser);
+    setIsLoggedIn(true);
     if (isSignup) {
       localStorage.setItem('devos_onboarding', 'true');
       setShowOnboarding(true);
@@ -46,6 +48,7 @@ export default function App() {
     localStorage.removeItem('devos_token');
     localStorage.removeItem('devos_onboarding');
     setUser(null);
+    setIsLoggedIn(false);
   }
 
   function handleChatAction(panel) {
@@ -65,6 +68,7 @@ export default function App() {
         .then(u => {
           if (u) {
             setUser(u);
+            setIsLoggedIn(true);
             if (localStorage.getItem('devos_onboarding') === 'true') setShowOnboarding(true);
           } else {
             localStorage.removeItem('devos_token');
@@ -171,18 +175,51 @@ export default function App() {
               Settings
             </button>
 
+            {/* Google connection */}
             {!connected && (
               <div style={{ padding: '6px 8px 2px' }}>
-                <a href="/api/auth/google">
-                  <button className="primary" style={{ width: '100%', fontSize: 12 }}>
-                    Connect Google
-                  </button>
-                </a>
+                <button
+                  className="primary"
+                  style={{ width: '100%', fontSize: 12 }}
+                  onClick={async () => {
+                    const r = await apiFetch('/api/auth/google/init');
+                    const { url } = await r.json();
+                    window.location.href = url;
+                  }}
+                >
+                  Connect Google
+                </button>
               </div>
             )}
             {connected && (
-              <div style={{ fontSize: 11, color: 'var(--success)', textAlign: 'center', padding: '6px 0' }}>
+              <div style={{ fontSize: 11, color: 'var(--success)', textAlign: 'center', padding: '4px 0' }}>
                 ● Google connected
+              </div>
+            )}
+
+            {/* User login / logout */}
+            <div style={{ height: '0.5px', background: 'var(--border)', margin: '6px 0 4px' }} />
+            {isLoggedIn ? (
+              <div style={{ padding: '4px 8px 6px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <span style={{ fontSize: 11, color: 'var(--muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  @{user.username}
+                </span>
+                <button
+                  onClick={handleLogout}
+                  style={{ fontSize: 11, color: 'var(--muted)', background: 'none', border: '0.5px solid var(--border)', borderRadius: 4, padding: '2px 8px', cursor: 'pointer', flexShrink: 0 }}
+                >
+                  Log out
+                </button>
+              </div>
+            ) : (
+              <div style={{ padding: '4px 8px 6px' }}>
+                <button
+                  onClick={() => setUser(null)}
+                  className="primary"
+                  style={{ width: '100%', fontSize: 12 }}
+                >
+                  Log in
+                </button>
               </div>
             )}
           </div>

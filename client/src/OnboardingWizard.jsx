@@ -110,11 +110,20 @@ function GoogleStep({ onNext }) {
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        <a href="/api/auth/google" style={{ textDecoration: 'none' }}>
-          <button className="primary" style={{ width: '100%', padding: '10px 16px' }}>
-            Connect Gmail &amp; Calendar
-          </button>
-        </a>
+        <button
+          className="primary"
+          style={{ width: '100%', padding: '10px 16px' }}
+          onClick={async () => {
+            const token = localStorage.getItem('devos_token');
+            const r = await fetch('/api/auth/google/init', {
+              headers: { Authorization: `Bearer ${token}` },
+            });
+            const { url } = await r.json();
+            window.location.href = url;
+          }}
+        >
+          Connect Gmail &amp; Calendar
+        </button>
         <button
           onClick={onNext}
           style={{ width: '100%', padding: '9px 16px', color: 'var(--muted)' }}

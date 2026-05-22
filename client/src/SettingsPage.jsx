@@ -279,9 +279,7 @@ function GoogleCard({ connected, email, onConnect }) {
             </p>
           )}
           <div style={{ display: 'flex', gap: 8 }}>
-            <a href="/api/auth/google?from=settings">
-              <button style={{ fontSize: 12, padding: '5px 12px' }}>Reconnect</button>
-            </a>
+            <button style={{ fontSize: 12, padding: '5px 12px' }} onClick={onConnect}>Reconnect</button>
           </div>
         </>
       ) : (
@@ -289,11 +287,9 @@ function GoogleCard({ connected, email, onConnect }) {
           <p style={{ fontSize: 12, color: 'var(--muted)', margin: '0 0 14px', lineHeight: 1.5 }}>
             Connects Gmail triage, email drafting, calendar management, and conflict detection. All in one OAuth flow.
           </p>
-          <a href="/api/auth/google?from=settings" style={{ textDecoration: 'none' }}>
-            <button className="primary" style={{ padding: '9px 20px', fontSize: 13 }}>
-              Connect Gmail &amp; Calendar
-            </button>
-          </a>
+          <button className="primary" style={{ padding: '9px 20px', fontSize: 13 }} onClick={onConnect}>
+            Connect Gmail &amp; Calendar
+          </button>
         </>
       )}
     </div>
@@ -486,11 +482,17 @@ export default function SettingsPage({ user, onLogout }) {
   }
 
   async function loadGoogleStatus() {
-    const r = await fetch('/api/auth/google/email');
+    const r = await apiFetch('/api/auth/google/email');
     if (!r.ok) return;
     const d = await r.json();
     setGoogleConnected(d.connected);
     setGoogleEmail(d.email);
+  }
+
+  async function handleGoogleConnect() {
+    const r = await apiFetch('/api/auth/google/init?from=settings');
+    const { url } = await r.json();
+    window.location.href = url;
   }
 
   async function testAndSave(service, payload) {
@@ -587,6 +589,7 @@ export default function SettingsPage({ user, onLogout }) {
       <GoogleCard
         connected={googleConnected}
         email={googleEmail}
+        onConnect={handleGoogleConnect}
       />
 
       {/* Section 3 — Productivity */}

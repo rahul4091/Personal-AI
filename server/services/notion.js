@@ -1,14 +1,19 @@
 // server/services/notion.js
 import { Client } from '@notionhq/client';
 
-if (!process.env.NOTION_API_KEY) console.warn('[notion] NOTION_API_KEY is not set');
-const notion = new Client({ auth: process.env.NOTION_API_KEY });
-const TASKS_DB = process.env.NOTION_TASKS_DB_ID;
-const NOTES_DB = process.env.NOTION_NOTES_DB_ID;
+function getClient(creds = {}) {
+  return new Client({ auth: creds.NOTION_API_KEY });
+}
+
+function tasksDb(creds = {}) { return creds.NOTION_TASKS_DB_ID; }
+function notesDb(creds = {}) { return creds.NOTION_NOTES_DB_ID; }
 
 // ─── Tasks ────────────────────────────────────────────────────────────────────
 
-export async function getTasks() {
+export async function getTasks(creds = {}) {
+  const notion = getClient(creds);
+  const TASKS_DB = tasksDb(creds);
+
   async function query(withFilter) {
     return notion.databases.query({
       database_id: TASKS_DB,
@@ -26,7 +31,7 @@ export async function getTasks() {
       res = await query(true);
     } catch (filterErr) {
       if (filterErr.code === 'validation_error') {
-        res = await query(false); // Status property doesn't exist — fetch all
+        res = await query(false);
       } else {
         throw filterErr;
       }
@@ -45,10 +50,11 @@ export async function getTasks() {
   }
 }
 
-export async function createTask(title, status = 'Not started') {
+export async function createTask(title, status = 'Not started', creds = {}) {
+  const notion = getClient(creds);
   try {
     const page = await notion.pages.create({
-      parent: { database_id: TASKS_DB },
+      parent: { database_id: tasksDb(creds) },
       properties: {
         Name:   { title: [{ text: { content: title } }] },
         Status: { select: { name: status } },
@@ -62,7 +68,8 @@ export async function createTask(title, status = 'Not started') {
   }
 }
 
-export async function updateTaskStatus(pageId, status) {
+export async function updateTaskStatus(pageId, status, creds = {}) {
+  const notion = getClient(creds);
   try {
     await notion.pages.update({
       page_id: pageId,
@@ -77,10 +84,11 @@ export async function updateTaskStatus(pageId, status) {
 
 // ─── Notes ────────────────────────────────────────────────────────────────────
 
-export async function getNotes() {
+export async function getNotes(creds = {}) {
+  const notion = getClient(creds);
   try {
     const res = await notion.databases.query({
-      database_id: NOTES_DB,
+      database_id: notesDb(creds),
       sorts: [{ timestamp: 'created_time', direction: 'descending' }],
       page_size: 10,
     });
@@ -97,10 +105,11 @@ export async function getNotes() {
   }
 }
 
-export async function createNote(title, body = '') {
+export async function createNote(title, body = '', creds = {}) {
+  const notion = getClient(creds);
   try {
     const page = await notion.pages.create({
-      parent: { database_id: NOTES_DB },
+      parent: { database_id: notesDb(creds) },
       properties: {
         Name: { title: [{ text: { content: title } }] },
       },
@@ -116,7 +125,8 @@ export async function createNote(title, body = '') {
   }
 }
 
-export async function updateTask(pageId, patches = {}) {
+export async function updateTask(pageId, patches = {}, creds = {}) {
+  const notion = getClient(creds);
   try {
     const properties = {};
     if (patches.title)  properties.Name   = { title: [{ text: { content: patches.title } }] };
@@ -129,8 +139,8 @@ export async function updateTask(pageId, patches = {}) {
   }
 }
 
-export async function deleteTask(pageId) {
-  // Notion doesn't permanently delete pages — archives them
+export async function deleteTask(pageId, creds = {}) {
+  const notion = getClient(creds);
   try {
     await notion.pages.update({ page_id: pageId, archived: true });
     return { deleted: true, id: pageId };

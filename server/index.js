@@ -38,23 +38,25 @@ app.use(express.json());
 
 // ─── Health check ─────────────────────────────────────────────────────────────
 
-app.get('/api/health', (req, res) => {
+app.get('/api/health', requireAuth, (req, res) => {
+  const googleConnectedId = auth.getConnectedUserId();
+  const googleForUser = auth.isConnected() && (googleConnectedId === null || googleConnectedId === req.user.userId);
   res.json({
-    ok:              true,
-    gemini:          !!process.env.GEMINI_API_KEY,
-    groq:            !!process.env.GROQ_API_KEY,
-    notion:          !!process.env.NOTION_API_KEY,
-    google:          auth.isConnected(),
-    slack:           !!process.env.SLACK_BOT_TOKEN,
-    github:          github.isConfigured(),
-    trello:          !!process.env.TRELLO_API_KEY,
-    todoist:         !!process.env.TODOIST_API_KEY,
-    linkedin:        !!process.env.LINKEDIN_WEBHOOK_URL,
+    ok:      true,
+    google:  googleForUser,
   });
 });
 
 // ─── Google OAuth2 ────────────────────────────────────────────────────────────
 
+// Authenticated endpoint — frontend calls this first to get the OAuth URL (so userId is baked in)
+app.get('/api/auth/google/init', requireAuth, (req, res) => {
+  const fromSettings = req.query.from === 'settings';
+  const state = `uid:${req.user.userId}${fromSettings ? ':from:settings' : ''}`;
+  res.json({ url: auth.getAuthUrl(state) });
+});
+
+// Legacy redirect — kept for backwards compat but no userId tracking
 app.get('/api/auth/google', (req, res) => {
   const state = req.query.from === 'settings' ? 'from:settings' : '';
   res.redirect(auth.getAuthUrl(state));
@@ -64,7 +66,10 @@ app.get('/api/auth/google/callback', async (req, res) => {
   try {
     const client      = auth.createOAuth2Client();
     const { tokens }  = await client.getToken(req.query.code);
-    auth.saveTokens(tokens);
+    const stateStr    = req.query.state ?? '';
+    const uidMatch    = stateStr.match(/uid:(\d+)/);
+    const userId      = uidMatch ? parseInt(uidMatch[1], 10) : null;
+    auth.saveTokens(tokens, userId);
     const frontendURL = process.env.RAILWAY_PUBLIC_DOMAIN
       ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
       : (process.env.APP_URL ?? 'http://localhost:5173');
@@ -77,9 +82,9 @@ app.get('/api/auth/google/callback', async (req, res) => {
   }
 });
 
-// Returns the Gmail address of the globally connected Google account
-app.get('/api/auth/google/email', async (req, res) => {
-  if (!auth.isConnected()) return res.json({ connected: false, email: null });
+// Returns the Gmail address — only for the user who connected Google
+app.get('/api/auth/google/email', requireAuth, async (req, res) => {
+  if (!auth.isConnected() || !isGoogleUser(req)) return res.json({ connected: false, email: null });
   try {
     const { google: googleapis } = await import('googleapis');
     const client = auth.getAuthClient();
@@ -97,16 +102,9 @@ app.get('/api/auth/status', (req, res) => {
 
 // ─── User account routes ───────────────────────────────────────────────────────
 
-app.post('/api/auth/signup', async (req, res) => {
-  try {
-    const { username, password, email } = req.body;
-    const user  = await userService.createUser(username, password, email);
-    const token = userService.signToken(user);
-    res.status(201).json({ token, user: { id: user.id, username: user.username, email: user.email } });
-  } catch (err) {
-    const isConflict = err.message.includes('already') || err.code === '23505';
-    res.status(isConflict ? 409 : 400).json({ error: err.message });
-  }
+// Signup disabled — re-enable when ready
+app.post('/api/auth/signup', (req, res) => {
+  res.status(403).json({ error: 'Sign-up is currently closed.' });
 });
 
 app.post('/api/auth/login', async (req, res) => {
@@ -138,12 +136,13 @@ app.get('/api/users/me', async (req, res) => {
 
 function requireAuth(req, res, next) {
   const header = req.headers.authorization;
-  if (!header?.startsWith('Bearer ')) return res.status(401).json({ error: 'Authentication required' });
+  if (!header?.startsWith('Bearer ')) return res.status(401).json({ error: 'Not authenticated' });
   try {
-    req.user = userService.verifyToken(header.slice(7)); // { userId, username, iat, exp }
+    const payload = userService.verifyToken(header.slice(7));
+    req.user = { userId: payload.userId, username: payload.username };
     next();
   } catch {
-    res.status(401).json({ error: 'Invalid or expired token' });
+    return res.status(401).json({ error: 'Invalid or expired token' });
   }
 }
 
@@ -498,39 +497,38 @@ function extractIssueBody(message, title) {
     .trim() || message;
 }
 
-async function executeAction(intent, params, originalMessage = '') {
+async function executeAction(intent, params, originalMessage = '', creds = {}) {
+  const apiKeys = { GEMINI_API_KEY: creds.GEMINI_API_KEY, GROQ_API_KEY: creds.GROQ_API_KEY };
+
   switch (intent) {
 
     case 'add_task': {
-      // Tasks → Todoist only
       if (!params.title) return null;
-      if (todoist.isConfigured()) return await todoist.createTask(params.title);
-      if (notionReady())          return await notion.createTask(params.title);
+      if (todoist.isConfigured(creds)) return await todoist.createTask(params.title, 'today', creds);
+      if (notionReady(creds))          return await notion.createTask(params.title, 'Not started', creds);
       return { error: 'No task service configured' };
     }
 
     case 'update_task': {
       if (!params.taskId) return { error: 'taskId is required' };
       const isTodoist = /^\d+$/.test(params.taskId) || params.source === 'todoist';
-      // Status-only update
       if (params.status && !params.title) {
         return isTodoist
-          ? await todoist.updateTaskStatus(params.taskId, params.status)
-          : await notion.updateTaskStatus(params.taskId, params.status);
+          ? await todoist.updateTaskStatus(params.taskId, params.status, creds)
+          : await notion.updateTaskStatus(params.taskId, params.status, creds);
       }
-      // Title (rename) or combined update
       const patches = {};
       if (params.title)  patches.title  = params.title;
       if (params.status) patches.status = params.status;
       return isTodoist
-        ? await todoist.updateTask(params.taskId, patches)
-        : await notion.updateTask(params.taskId, patches);
+        ? await todoist.updateTask(params.taskId, patches, creds)
+        : await notion.updateTask(params.taskId, patches, creds);
     }
 
     case 'get_tasks': {
       const [nt, tt] = await Promise.all([
-        notionReady()          ? notion.getTasks()  : [],
-        todoist.isConfigured() ? todoist.getTasks() : [],
+        notionReady(creds)          ? notion.getTasks(creds)  : [],
+        todoist.isConfigured(creds) ? todoist.getTasks('today | overdue', creds) : [],
       ]);
       return { notion: nt, todoist: tt };
     }
@@ -539,24 +537,23 @@ async function executeAction(intent, params, originalMessage = '') {
       if (!params.taskId) return { error: 'taskId is required' };
       const isTodoist = /^\d+$/.test(params.taskId) || params.source === 'todoist';
       return isTodoist
-        ? await todoist.deleteTask(params.taskId)
-        : await notion.deleteTask(params.taskId);
+        ? await todoist.deleteTask(params.taskId, creds)
+        : await notion.deleteTask(params.taskId, creds);
     }
 
     case 'create_note':
-      // Notes → Notion only
       if (!params.title) return null;
-      if (!notionReady()) return { error: 'Notion is not configured' };
-      return await notion.createNote(params.title, params.body ?? '');
+      if (!notionReady(creds)) return { error: 'Notion is not configured' };
+      return await notion.createNote(params.title, params.body ?? '', creds);
 
     case 'get_notes':
-      return { notes: await notion.getNotes() };
+      return { notes: await notion.getNotes(creds) };
 
     case 'get_emails':
       return { emails: await gmail.triageInbox(10) };
 
     case 'get_emails_range': {
-      const { startDate, endDate, title } = params;
+      const { startDate, endDate } = params;
       if (!startDate) return { error: 'startDate is required' };
       const emails = await gmail.getEmailsByDateRange(startDate, endDate ?? new Date().toISOString().slice(0, 10));
       return { emails, count: emails.length, range: { startDate, endDate } };
@@ -604,7 +601,7 @@ async function executeAction(intent, params, originalMessage = '') {
       const target = params.title || params.taskId;
       if (!target) return { error: 'Provide the event name to update' };
       const patches = {};
-      if (params.body)     patches.title    = params.body;    // body = new title (rename)
+      if (params.body)     patches.title    = params.body;
       if (params.date)     patches.date     = resolveDate(params.date) ?? params.date;
       if (params.duration) patches.duration = Number(params.duration);
       return await calendar.updateEvent(target, patches);
@@ -620,11 +617,11 @@ async function executeAction(intent, params, originalMessage = '') {
       return { blocks: await calendar.blockFocusTime(params.title ?? 'Deep work') };
 
     case 'get_prs':
-      return { prs: await github.getOpenPRs(params.repo), stale: await github.scanStalePRs(3, params.repo) };
+      return { prs: await github.getOpenPRs(params.repo, creds), stale: await github.scanStalePRs(3, params.repo, creds) };
 
     case 'create_issue': {
       if (!params.title) return { error: 'title is required' };
-      const repos = github.getRepos();
+      const repos = github.getRepos(creds);
       if (!params.repo && repos.length > 1) {
         return { error: `Which repo? Available: ${repos.map(r => r.split('/')[1]).join(', ')}` };
       }
@@ -637,35 +634,34 @@ async function executeAction(intent, params, originalMessage = '') {
         `Structure it with these sections (use only the ones that apply):\n` +
         `## Summary\n## Goals\n## Suggested approach\n## Tests\n## Considerations\n\n` +
         `Use bullet points. Be specific and actionable. Do not repeat the title. Output only the markdown body.`,
-        '',
-        'content'
+        '', 'content', apiKeys
       ).catch(() => userContext);
-      return await github.createIssue(params.title, body, labels, params.repo);
+      return await github.createIssue(params.title, body, labels, params.repo, creds);
     }
 
     case 'get_issues': {
-      const repos = github.getRepos();
+      const repos = github.getRepos(creds);
       if (!params.repo && repos.length > 1) {
         return { error: `Which repo? Available: ${repos.map(r => r.split('/')[1]).join(', ')}` };
       }
-      return { issues: await github.getIssues('open', params.repo), repo: params.repo };
+      return { issues: await github.getIssues('open', params.repo, creds), repo: params.repo };
     }
 
     case 'delete_issue': {
       if (!params.taskId) return { error: 'Issue number is required' };
-      const repos = github.getRepos();
+      const repos = github.getRepos(creds);
       if (!params.repo && repos.length > 1) return { error: `Which repo? Available: ${repos.map(r => r.split('/')[1]).join(', ')}` };
-      return await github.deleteIssue(params.taskId, params.repo);
+      return await github.deleteIssue(params.taskId, params.repo, creds);
     }
 
     case 'close_issue': {
       if (!params.taskId) return { error: 'Issue number (taskId) is required' };
-      const repos = github.getRepos();
+      const repos = github.getRepos(creds);
       if (!params.repo && repos.length > 1) return { error: `Which repo? Available: ${repos.map(r => r.split('/')[1]).join(', ')}` };
       try {
-        return await github.closeIssue(params.taskId, params.repo);
+        return await github.closeIssue(params.taskId, params.repo, creds);
       } catch (err) {
-        const open = await github.getIssues('open', params.repo).catch(() => []);
+        const open = await github.getIssues('open', params.repo, creds).catch(() => []);
         const list = open.length ? open.map(i => `#${i.id} ${i.title}`).join(', ') : 'none';
         return { error: `Issue #${params.taskId} not found. Open issues: ${list}` };
       }
@@ -673,39 +669,39 @@ async function executeAction(intent, params, originalMessage = '') {
 
     case 'reopen_issue': {
       if (!params.taskId) return { error: 'Issue number (taskId) is required' };
-      const repos = github.getRepos();
+      const repos = github.getRepos(creds);
       if (!params.repo && repos.length > 1) return { error: `Which repo? Available: ${repos.map(r => r.split('/')[1]).join(', ')}` };
-      return await github.reopenIssue(params.taskId, params.repo);
+      return await github.reopenIssue(params.taskId, params.repo, creds);
     }
 
     case 'update_issue': {
       if (!params.taskId) return { error: 'Issue number (taskId) is required' };
-      const repos = github.getRepos();
+      const repos = github.getRepos(creds);
       if (!params.repo && repos.length > 1) return { error: `Which repo? Available: ${repos.map(r => r.split('/')[1]).join(', ')}` };
       const patches = {};
       if (params.title)  patches.title  = params.title;
       if (params.body)   patches.body   = params.body;
       if (params.labels) patches.labels = Array.isArray(params.labels) ? params.labels : String(params.labels).split(',').map(l => l.trim());
       if (params.status) patches.state  = params.status === 'closed' ? 'closed' : 'open';
-      return await github.updateIssue(params.taskId, patches, params.repo);
+      return await github.updateIssue(params.taskId, patches, params.repo, creds);
     }
 
     case 'comment_issue': {
       if (!params.taskId || !params.body) return { error: 'Issue number and comment body are required' };
-      const repos = github.getRepos();
+      const repos = github.getRepos(creds);
       if (!params.repo && repos.length > 1) return { error: `Which repo? Available: ${repos.map(r => r.split('/')[1]).join(', ')}` };
-      return await github.commentOnIssue(params.taskId, params.body, params.repo);
+      return await github.commentOnIssue(params.taskId, params.body, params.repo, creds);
     }
 
     case 'close_pr': {
       if (!params.taskId) return { error: 'PR number (taskId) is required' };
-      const repos = github.getRepos();
+      const repos = github.getRepos(creds);
       if (!params.repo && repos.length > 1) return { error: `Which repo? Available: ${repos.map(r => r.split('/')[1]).join(', ')}` };
-      return await github.closePR(params.taskId, params.repo);
+      return await github.closePR(params.taskId, params.repo, creds);
     }
 
     case 'get_trello':
-      return { cards: await trello.getCards(), stale: await trello.scanStaleCards(5) };
+      return { cards: await trello.getCards(creds), stale: await trello.scanStaleCards(5, creds) };
 
     case 'run_digest':
       runDigest().catch(console.error);
@@ -740,24 +736,28 @@ const EMAIL_ACTION_INTENTS    = new Set(['draft_email', 'send_email', 'get_email
 const DIGEST_ACTION_INTENTS   = new Set(['run_digest', 'get_digest']);
 const QUERY_INTENTS_SET       = new Set(['get_tasks','get_emails','get_emails_range','get_calendar','get_notes','get_prs','get_trello','get_digest','get_issues']);
 
-app.post('/api/chat', async (req, res) => {
+app.post('/api/chat', requireAuth, async (req, res) => {
   const { message, history = [] } = req.body;
   if (!message?.trim()) return res.status(400).json({ error: 'message required' });
 
   try {
+    const creds = await getUserCreds(req.user.userId);
+    const apiKeys = { GEMINI_API_KEY: creds.GEMINI_API_KEY, GROQ_API_KEY: creds.GROQ_API_KEY };
+
     const connectedTools = [
-      notionReady()                    && 'Notion (tasks & notes)',
-      todoist.isConfigured()           && 'Todoist (tasks)',
-      auth.isConnected()               && 'Gmail & Google Calendar',
-      process.env.SLACK_BOT_TOKEN      && 'Slack',
-      process.env.GITHUB_TOKEN         && 'GitHub',
-      process.env.TRELLO_API_KEY       && 'Trello',
+      notionReady(creds)                                            && 'Notion (tasks & notes)',
+      todoist.isConfigured(creds)                                   && 'Todoist (tasks)',
+      auth.isConnected()                                            && 'Gmail & Google Calendar',
+      (creds.SLACK_BOT_TOKEN  ?? process.env.SLACK_BOT_TOKEN)      && 'Slack',
+      (creds.GITHUB_TOKEN     ?? process.env.GITHUB_TOKEN)         && 'GitHub',
+      (creds.TRELLO_API_KEY   ?? process.env.TRELLO_API_KEY)       && 'Trello',
     ].filter(Boolean).join(', ');
 
     const memContext = memory.buildContextSummary();
     const classified = await llm.classify(
       `Today is ${new Date().toDateString()}. Connected tools: ${connectedTools}.${memContext ? ' User context: ' + memContext : ''}\n${buildRoutingRules()}\nUser message: "${message}"`,
-      AGENT_SCHEMA
+      AGENT_SCHEMA,
+      apiKeys
     );
 
     const actions  = classified.actions ?? [];
@@ -766,9 +766,8 @@ app.post('/api/chat', async (req, res) => {
     const intents  = [];
 
     if (!isChat) {
-      // Execute all actions, in parallel where safe
       const settled = await Promise.allSettled(
-        actions.map(a => executeAction(a.intent, a.params ?? {}, message))
+        actions.map(a => executeAction(a.intent, a.params ?? {}, message, creds))
       );
       settled.forEach((s, i) => {
         const intent = actions[i].intent;
@@ -798,7 +797,7 @@ app.post('/api/chat', async (req, res) => {
         : 'Summarise clearly in 2-4 sentences.';
       finalReply = await llm.generate(
         `User asked: "${message}"\nData:\n${summary}\n${summaryGuide}`,
-        '', 'chat'
+        '', 'chat', apiKeys
       );
     } else if (results.length > 0) {
       const failedResult = results.find(r => r?.error);
@@ -807,14 +806,13 @@ app.post('/api/chat', async (req, res) => {
         const summary = actions.map((a, i) => `${a.intent}: ${JSON.stringify(results[i])}`).join('\n');
         finalReply = await llm.generate(
           `User asked: "${message}"\nAction results:\n${summary}\nExplain clearly in 1-2 sentences what failed and why.`,
-          '', 'chat'
+          '', 'chat', apiKeys
         );
       } else {
         // All actions succeeded — use the pre-classified reply (no extra LLM call)
         finalReply = classified.reply ?? 'Done.';
       }
     } else {
-      // general_chat — single direct call, no classification overhead next time
       const historyMsgs = history.slice(-5).map(m => ({ role: m.role, content: m.content }));
       finalReply = await llm.call(
         [
@@ -822,7 +820,7 @@ app.post('/api/chat', async (req, res) => {
           ...historyMsgs,
           { role: 'user', content: message },
         ],
-        { taskType: 'chat', maxTokens: 400 }
+        { taskType: 'chat', maxTokens: 400, apiKeys }
       );
     }
 
@@ -851,17 +849,32 @@ app.post('/api/chat', async (req, res) => {
 
 // ─── Panel data endpoints ─────────────────────────────────────────────────────
 
-// Notion is ready only when both key AND database ID are set
-function notionReady() {
-  return !!(process.env.NOTION_API_KEY && process.env.NOTION_TASKS_DB_ID &&
-            process.env.NOTION_TASKS_DB_ID !== 'your_tasks_database_id_here');
+// Returns true if the logged-in user is the one who connected Google OAuth.
+// Falls back to true when no userId was recorded (legacy tokens.json).
+function isGoogleUser(req) {
+  const storedId = auth.getConnectedUserId();
+  if (storedId === null) return true;
+  return storedId === req.user.userId;
 }
 
-app.get('/api/tasks', async (req, res) => {
+// Notion is ready only when both key AND database ID are set
+function notionReady(creds = {}) {
+  const key = creds.NOTION_API_KEY    ?? process.env.NOTION_API_KEY;
+  const db  = creds.NOTION_TASKS_DB_ID ?? process.env.NOTION_TASKS_DB_ID;
+  return !!(key && db && db !== 'your_tasks_database_id_here');
+}
+
+// Fetch decrypted per-user credentials, falling back to empty object on error
+async function getUserCreds(userId) {
+  return integrations.getUserCredentials(userId).catch(() => ({}));
+}
+
+app.get('/api/tasks', requireAuth, async (req, res) => {
   try {
+    const creds = await getUserCreds(req.user.userId);
     const [nr, tr] = await Promise.allSettled([
-      notionReady()             ? notion.getTasks()   : Promise.resolve([]),
-      todoist.isConfigured()    ? todoist.getTasks()  : Promise.resolve([]),
+      notionReady(creds)          ? notion.getTasks(creds)  : Promise.resolve([]),
+      todoist.isConfigured(creds) ? todoist.getTasks('today | overdue', creds) : Promise.resolve([]),
     ]);
     res.json({
       notion:  nr.status === 'fulfilled' ? nr.value : [],
@@ -870,28 +883,34 @@ app.get('/api/tasks', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-app.post('/api/tasks', async (req, res) => {
+app.post('/api/tasks', requireAuth, async (req, res) => {
   try {
     const { title } = req.body;
     if (!title?.trim()) return res.status(400).json({ error: 'title is required' });
     const trimmed = title.trim();
-    if (notionReady()) {
+    const creds = await getUserCreds(req.user.userId);
+    if (notionReady(creds)) {
       const [notionTask] = await Promise.all([
-        notion.createTask(trimmed),
-        todoist.createTask(trimmed).catch(err => console.error('[todoist sync]', err.message)),
+        notion.createTask(trimmed, 'Not started', creds),
+        todoist.createTask(trimmed, 'today', creds).catch(err => console.error('[todoist sync]', err.message)),
       ]);
       return res.json(notionTask);
     }
-    // Todoist-only
-    const task = await todoist.createTask(trimmed);
+    const task = await todoist.createTask(trimmed, 'today', creds);
     if (!task) return res.status(500).json({ error: 'Failed to create task in Todoist' });
     res.json(task);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
-app.get('/api/notes',    async (req, res) => { try { res.json(await notion.getNotes())          } catch(e){ res.status(500).json({error:e.message}) }});
+app.get('/api/notes', requireAuth, async (req, res) => {
+  try {
+    const creds = await getUserCreds(req.user.userId);
+    res.json(await notion.getNotes(creds));
+  } catch(e){ res.status(500).json({error:e.message}) }
+});
 let _emailCache = null, _emailCacheAt = 0;
-const EMAIL_TTL = 5 * 60 * 1000; // 5 minutes
-app.get('/api/emails', async (req, res) => {
+const EMAIL_TTL = 5 * 60 * 1000;
+app.get('/api/emails', requireAuth, async (req, res) => {
+  if (!auth.isConnected() || !isGoogleUser(req)) return res.json([]);
   if (_emailCache && Date.now() - _emailCacheAt < EMAIL_TTL) return res.json(_emailCache);
   try {
     _emailCache  = await gmail.triageInbox(15);
@@ -899,8 +918,11 @@ app.get('/api/emails', async (req, res) => {
     res.json(_emailCache);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
-app.get('/api/calendar',  async (req, res) => { try { res.json(await calendar.getUpcoming(10))  } catch(e){ res.status(500).json({error:e.message}) }});
-app.post('/api/calendar', async (req, res) => {
+app.get('/api/calendar', requireAuth, async (req, res) => {
+  if (!auth.isConnected() || !isGoogleUser(req)) return res.json([]);
+  try { res.json(await calendar.getUpcoming(10)) } catch(e){ res.status(500).json({error:e.message}) }
+});
+app.post('/api/calendar', requireAuth, async (req, res) => {
   try {
     const { title, date, duration = 60, description = '', recurring, days, time } = req.body;
     if (!title) return res.status(400).json({ error: 'title is required' });
@@ -917,48 +939,76 @@ app.post('/api/calendar', async (req, res) => {
     res.json(event);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
-app.get('/api/github/repos',    (req, res) => res.json(github.getRepos()));
-app.get('/api/prs',              async (req, res) => { try { res.json(await github.getOpenPRs(req.query.repo))             } catch(e){ res.status(500).json({error:e.message}) }});
-app.get('/api/github/issues',   async (req, res) => { try { res.json(await github.getIssues('open', req.query.repo))       } catch(e){ res.status(500).json({error:e.message}) }});
-app.post('/api/github/issues',  async (req, res) => {
+app.get('/api/github/repos', requireAuth, async (req, res) => {
+  const creds = await getUserCreds(req.user.userId);
+  res.json(github.getRepos(creds));
+});
+app.get('/api/prs', requireAuth, async (req, res) => {
+  try {
+    const creds = await getUserCreds(req.user.userId);
+    res.json(await github.getOpenPRs(req.query.repo, creds));
+  } catch(e){ res.status(500).json({error:e.message}) }
+});
+app.get('/api/github/issues', requireAuth, async (req, res) => {
+  try {
+    const creds = await getUserCreds(req.user.userId);
+    res.json(await github.getIssues('open', req.query.repo, creds));
+  } catch(e){ res.status(500).json({error:e.message}) }
+});
+app.post('/api/github/issues', requireAuth, async (req, res) => {
   try {
     const { title, body = '', labels = [], repo } = req.body;
     if (!title?.trim()) return res.status(400).json({ error: 'title is required' });
-    res.json(await github.createIssue(title.trim(), body, labels, repo));
+    const creds = await getUserCreds(req.user.userId);
+    res.json(await github.createIssue(title.trim(), body, labels, repo, creds));
   } catch(e){ res.status(500).json({error:e.message}) }
 });
-app.get('/api/github/merged',   async (req, res) => { try { res.json(await github.getMergedPRs(undefined, req.query.repo)) } catch(e){ res.status(500).json({error:e.message}) }});
-app.get('/api/github/changelog',async (req, res) => {
+app.get('/api/github/merged', requireAuth, async (req, res) => {
   try {
-    const changelog = await github.generateChangelog(undefined, req.query.repo);
+    const creds = await getUserCreds(req.user.userId);
+    res.json(await github.getMergedPRs(undefined, req.query.repo, creds));
+  } catch(e){ res.status(500).json({error:e.message}) }
+});
+app.get('/api/github/changelog', requireAuth, async (req, res) => {
+  try {
+    const creds = await getUserCreds(req.user.userId);
+    const changelog = await github.generateChangelog(undefined, req.query.repo, creds);
     res.json({ changelog });
   } catch(e){ res.status(500).json({error:e.message}) }
 });
-app.post('/api/github/draft-body', async (req, res) => {
+app.post('/api/github/draft-body', requireAuth, async (req, res) => {
   try {
     const { title, context = '' } = req.body;
     if (!title?.trim()) return res.status(400).json({ error: 'title required' });
+    const creds   = await getUserCreds(req.user.userId);
+    const apiKeys = { GEMINI_API_KEY: creds.GEMINI_API_KEY, GROQ_API_KEY: creds.GROQ_API_KEY };
     const body = await llm.generate(
       `Draft a GitHub issue body in markdown for the issue titled: "${title.trim()}". ` +
       `${context.trim() ? `Additional context: ${context.trim()} ` : ''}` +
       `Structure it with sections: ## Summary, ## Goals, ## Suggested approach, ## Tests (if applicable). ` +
       `Use bullet points. Be specific. Output only the markdown body, no preamble.`,
-      '', 'content'
+      '', 'content', apiKeys
     );
     res.json({ body });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
-app.post('/api/slack/send', async (req, res) => {
+app.post('/api/slack/send', requireAuth, async (req, res) => {
   try {
     const { text } = req.body;
     if (!text?.trim()) return res.status(400).json({ error: 'text required' });
-    const ts = await slack.sendDM(text.trim());
+    const creds = await getUserCreds(req.user.userId);
+    const ts = await slack.sendDM(text.trim(), creds);
     res.json({ ok: !!ts, ts });
   } catch(e){ res.status(500).json({ error: e.message }) }
 });
-app.get('/api/cards',    async (req, res) => { try { res.json(await trello.getCards())          } catch(e){ res.status(500).json({error:e.message}) }});
-app.get('/api/memory',   async (req, res) => { res.json(memory.getMemory()) });
-app.get('/api/activity', async (req, res) => {
+app.get('/api/cards', requireAuth, async (req, res) => {
+  try {
+    const creds = await getUserCreds(req.user.userId);
+    res.json(await trello.getCards(creds));
+  } catch(e){ res.status(500).json({error:e.message}) }
+});
+app.get('/api/memory', requireAuth, async (req, res) => { res.json(memory.getMemory()) });
+app.get('/api/activity', requireAuth, async (req, res) => {
   const limit = Math.min(Number(req.query.limit ?? 50), 200);
   res.json(memory.getActivityLog(limit));
 });
@@ -967,7 +1017,8 @@ app.get('/api/activity', async (req, res) => {
 
 function invalidateEmailCache() { _emailCache = null; _emailCacheAt = 0; }
 
-app.get('/api/email/:id', async (req, res) => {
+app.get('/api/email/:id', requireAuth, async (req, res) => {
+  if (!isGoogleUser(req)) return res.status(403).json({ error: 'Google not connected for this account' });
   try {
     const email = await gmail.getEmail(req.params.id);
     if (!email) return res.status(404).json({ error: 'not found' });
@@ -975,7 +1026,7 @@ app.get('/api/email/:id', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-app.post('/api/email/send', async (req, res) => {
+app.post('/api/email/send', requireAuth, async (req, res) => {
   try {
     const { to, subject, body } = req.body;
     if (!to || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) return res.status(400).json({ error: 'valid "to" email required' });
@@ -990,8 +1041,8 @@ app.post('/api/email/send', async (req, res) => {
     res.status(500).json({ error: `Failed to send email: ${e.message}` });
   }
 });
-app.post('/api/email/archive', async (req, res) => { try { invalidateEmailCache(); res.json(await gmail.archiveEmail(req.body.id)) } catch(e){ res.status(500).json({error:e.message}) }});
-app.post('/api/email/approve-draft', async (req, res) => {
+app.post('/api/email/archive', requireAuth, async (req, res) => { try { invalidateEmailCache(); res.json(await gmail.archiveEmail(req.body.id)) } catch(e){ res.status(500).json({error:e.message}) }});
+app.post('/api/email/approve-draft', requireAuth, async (req, res) => {
   try {
     const { to, subject, original, edited } = req.body;
     if (!to || !edited?.trim()) return res.status(400).json({ error: 'to and edited body are required' });
@@ -1008,20 +1059,20 @@ app.post('/api/email/approve-draft', async (req, res) => {
   }
 });
 
-app.post('/api/task/update', async (req, res) => {
+app.post('/api/task/update', requireAuth, async (req, res) => {
   try {
     const { id, status, source } = req.body;
-    // Todoist IDs are numeric strings; Notion IDs are UUIDs with dashes
+    const creds = await getUserCreds(req.user.userId);
     const isTodoist = source === 'todoist' || /^\d+$/.test(id);
     const result = isTodoist
-      ? await todoist.updateTaskStatus(id, status)
-      : await notion.updateTaskStatus(id, status);
+      ? await todoist.updateTaskStatus(id, status, creds)
+      : await notion.updateTaskStatus(id, status, creds);
     res.json(result);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
-app.post('/api/memory/vip',  async (req, res) => { res.json({ vips: memory.addVIP(req.body.email, req.body.name) }) });
-app.post('/api/content/linkedin', async (req, res) => { try { res.json(await content.draftLinkedInPost(req.body.source)) } catch(e){ res.status(500).json({error:e.message}) }});
-app.post('/api/content/approve', async (req, res) => {
+app.post('/api/memory/vip', requireAuth, async (req, res) => { res.json({ vips: memory.addVIP(req.body.email, req.body.name) }) });
+app.post('/api/content/linkedin', requireAuth, async (req, res) => { try { res.json(await content.draftLinkedInPost(req.body.source)) } catch(e){ res.status(500).json({error:e.message}) }});
+app.post('/api/content/approve', requireAuth, async (req, res) => {
   const { original, edited, type = 'linkedin', postNow = false } = req.body;
   memory.recordApprovedDraft(original, edited, type);
 
@@ -1145,7 +1196,7 @@ export async function runDigest() {
 
 // ─── Manual digest trigger ────────────────────────────────────────────────────
 
-app.post('/api/digest/run', async (req, res) => {
+app.post('/api/digest/run', requireAuth, async (req, res) => {
   try {
     const digest = await runDigest();
     res.json(digest);
@@ -1155,7 +1206,7 @@ app.post('/api/digest/run', async (req, res) => {
   }
 });
 
-app.get('/api/digest/latest', (req, res) => {
+app.get('/api/digest/latest', requireAuth, (req, res) => {
   res.json(_cachedDigest ?? null);
 });
 

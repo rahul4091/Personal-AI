@@ -45,8 +45,19 @@ export function getAuthClient() {
   return client;
 }
 
-export function saveTokens(tokens) {
-  fs.writeFileSync(TOKEN_PATH, JSON.stringify(tokens));
+export function saveTokens(tokens, userId = null) {
+  let connectedUserId = userId;
+  if (connectedUserId === null && fs.existsSync(TOKEN_PATH)) {
+    try { connectedUserId = JSON.parse(fs.readFileSync(TOKEN_PATH, 'utf8')).connectedUserId ?? null; } catch {}
+  }
+  const data = { ...tokens };
+  if (connectedUserId !== null) data.connectedUserId = connectedUserId;
+  fs.writeFileSync(TOKEN_PATH, JSON.stringify(data));
+}
+
+export function getConnectedUserId() {
+  if (!fs.existsSync(TOKEN_PATH)) return null;
+  try { return JSON.parse(fs.readFileSync(TOKEN_PATH, 'utf8')).connectedUserId ?? null; } catch { return null; }
 }
 
 export function isConnected() {
@@ -67,4 +78,4 @@ export function getAuthUrl(state = '') {
   return createOAuth2Client().generateAuthUrl(opts);
 }
 
-export default { createOAuth2Client, getAuthClient, saveTokens, isConnected, getAuthUrl };
+export default { createOAuth2Client, getAuthClient, saveTokens, isConnected, getAuthUrl, getConnectedUserId };
