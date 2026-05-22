@@ -87,7 +87,20 @@ export default function App() {
       .then(d => { setHealth(d); setConnected(d.google); })
       .catch(() => {});
 
-    // ── 3. Google OAuth redirect ─────────────────────────────────────────────
+    // ── 3. Google sign-in redirect (token in URL) ────────────────────────────
+    const params = new URLSearchParams(window.location.search);
+    const googleToken = params.get('google_token');
+    if (googleToken) {
+      localStorage.setItem('devos_token', googleToken);
+      window.history.replaceState({}, '', '/');
+      fetch('/api/users/me', { headers: { Authorization: `Bearer ${googleToken}` } })
+        .then(r => r.ok ? r.json() : null)
+        .then(u => { if (u) { setUser(u); setIsLoggedIn(true); setAuthChecked(true); } })
+        .catch(() => {});
+      return;
+    }
+
+    // ── 4. Google OAuth redirect ─────────────────────────────────────────────
     if (window.location.search.includes('connected=true')) {
       setConnected(true);
       // Don't clear the URL here — OnboardingWizard handles it when active.

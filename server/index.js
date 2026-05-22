@@ -56,6 +56,11 @@ app.get('/api/auth/google/init', requireAuth, (req, res) => {
   res.json({ url: auth.getAuthUrl(state) });
 });
 
+// Unauthenticated — used from the login page to sign in / sign up via Google
+app.get('/api/auth/google/signin', (req, res) => {
+  res.redirect(auth.getAuthUrl('mode:signin'));
+});
+
 // Legacy redirect — kept for backwards compat but no userId tracking
 app.get('/api/auth/google', (req, res) => {
   const state = req.query.from === 'settings' ? 'from:settings' : '';
@@ -63,22 +68,64 @@ app.get('/api/auth/google', (req, res) => {
 });
 
 app.get('/api/auth/google/callback', async (req, res) => {
+  const frontendURL = process.env.RAILWAY_PUBLIC_DOMAIN
+    ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+    : (process.env.APP_URL ?? 'http://localhost:5173');
   try {
-    const client      = auth.createOAuth2Client();
-    const { tokens }  = await client.getToken(req.query.code);
-    const stateStr    = req.query.state ?? '';
-    const uidMatch    = stateStr.match(/uid:(\d+)/);
-    const userId      = uidMatch ? parseInt(uidMatch[1], 10) : null;
+    const client     = auth.createOAuth2Client();
+    const { tokens } = await client.getToken(req.query.code);
+    const stateStr   = req.query.state ?? '';
+
+    // ── Google Sign-in / Sign-up flow ────────────────────────────────────────
+    if (stateStr.includes('mode:signin')) {
+      client.setCredentials(tokens);
+      const { google: googleapis } = await import('googleapis');
+      const oauth2   = googleapis.oauth2({ version: 'v2', auth: client });
+      const profile  = await oauth2.userinfo.get();
+      const googleId = profile.data.id;
+      const email    = profile.data.email;
+      const name     = profile.data.name ?? '';
+
+      let user = await userService.dbFindByGoogleId(googleId);
+
+      if (!user) {
+        // Check if an account with same email exists — link it
+        const existing = await userService.dbFindByEmail(email);
+        if (existing) {
+          await userService.dbLinkGoogleId(existing.id, googleId);
+          user = existing;
+        } else {
+          // Create a new account from the Google profile
+          let base = (email.split('@')[0] ?? name).replace(/[^a-zA-Z0-9_]/g, '').slice(0, 28) || 'user';
+          let username = base;
+          let attempt  = 1;
+          while (true) {
+            try {
+              user = await userService.dbCreateGoogleUser({ username, email, googleId });
+              break;
+            } catch (e) {
+              if (!e.message.includes('already taken') && !e.message.includes('unique')) throw e;
+              username = `${base}_${attempt++}`;
+            }
+          }
+        }
+      }
+
+      // Save Google tokens linked to this user, then redirect with JWT
+      auth.saveTokens(tokens, user.id);
+      const token = userService.signToken({ id: user.id, username: user.username });
+      return res.redirect(`${frontendURL}/?google_token=${token}`);
+    }
+
+    // ── Connect Google to an existing logged-in account ───────────────────────
+    const uidMatch = stateStr.match(/uid:(\d+)/);
+    const userId   = uidMatch ? parseInt(uidMatch[1], 10) : null;
     auth.saveTokens(tokens, userId);
-    const frontendURL = process.env.RAILWAY_PUBLIC_DOMAIN
-      ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
-      : (process.env.APP_URL ?? 'http://localhost:5173');
-    const fromSettings = (req.query.state ?? '').includes('from:settings');
-    const returnPath   = fromSettings ? '/settings?google_connected=true' : '/?connected=true';
-    res.redirect(`${frontendURL}${returnPath}`);
+    const fromSettings = stateStr.includes('from:settings');
+    res.redirect(`${frontendURL}${fromSettings ? '/settings?google_connected=true' : '/?connected=true'}`);
   } catch (err) {
     console.error('[auth/google/callback]', err.message);
-    res.status(500).send('Authentication failed. Please try again.');
+    res.redirect(`${frontendURL}/?auth_error=google_failed`);
   }
 });
 

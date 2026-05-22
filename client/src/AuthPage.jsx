@@ -1,10 +1,9 @@
 import { useState } from 'react';
 
 export default function AuthPage({ onAuth }) {
-  const [mode,     setMode]     = useState('login');
+  const mode = 'login'; // signup disabled — re-enable later
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
-  const [email,    setEmail]    = useState('');
   const [error,    setError]    = useState('');
   const [loading,  setLoading]  = useState(false);
 
@@ -16,11 +15,7 @@ export default function AuthPage({ onAuth }) {
       const res  = await fetch(`/api/auth/${mode}`, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({
-          username,
-          password,
-          ...(mode === 'signup' ? { email } : {}),
-        }),
+        body:    JSON.stringify({ username, password }),
       });
       const data = await res.json();
       if (!res.ok) { setError(data.error ?? 'Something went wrong'); return; }
@@ -31,11 +26,6 @@ export default function AuthPage({ onAuth }) {
     } finally {
       setLoading(false);
     }
-  }
-
-  function toggleMode() {
-    setMode(m => m === 'login' ? 'signup' : 'login');
-    setError('');
   }
 
   return (
@@ -65,7 +55,7 @@ export default function AuthPage({ onAuth }) {
             <span style={{ fontWeight: 600, fontSize: 18, color: 'var(--text)' }}>DevOS</span>
           </div>
           <p style={{ fontSize: 'var(--fs-base)', color: 'var(--muted)', margin: 0 }}>
-            {mode === 'login' ? 'Sign in to your workspace' : 'Create your workspace'}
+            Sign in to your workspace
           </p>
         </div>
 
@@ -78,15 +68,6 @@ export default function AuthPage({ onAuth }) {
             autoFocus
             autoComplete="off"
           />
-          {mode === 'signup' && (
-            <input
-              type="email"
-              placeholder="Email (optional)"
-              value={email}
-              onChange={e => setEmail(e.target.value)}
-              autoComplete="email"
-            />
-          )}
           <input
             type="password"
             placeholder="Password"
@@ -108,23 +89,37 @@ export default function AuthPage({ onAuth }) {
             className="primary"
             style={{ marginTop: 4, padding: '9px 16px', fontSize: 'var(--fs-base)' }}
           >
-            {loading ? '…' : mode === 'login' ? 'Sign in' : 'Create account'}
+            {loading ? '…' : 'Sign in'}
           </button>
         </form>
 
-        <p style={{ margin: '20px 0 0', fontSize: 'var(--fs-sm)', color: 'var(--muted)', textAlign: 'center' }}>
-          {mode === 'login' ? "Don't have an account? " : 'Already have an account? '}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '16px 0' }}>
+          <div style={{ flex: 1, height: '0.5px', background: 'var(--border)' }} />
+          <span style={{ fontSize: 11, color: 'var(--hint)' }}>or</span>
+          <div style={{ flex: 1, height: '0.5px', background: 'var(--border)' }} />
+        </div>
+
+        <a href="/api/auth/google/signin" style={{ textDecoration: 'none', display: 'block' }}>
           <button
-            onClick={toggleMode}
+            type="button"
             style={{
-              background: 'none', border: 'none',
-              color: 'var(--accent)', cursor: 'pointer',
-              fontSize: 'var(--fs-sm)', padding: 0, fontWeight: 500,
+              width: '100%', padding: '9px 16px',
+              fontSize: 'var(--fs-base)', fontWeight: 500,
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
+              background: 'var(--surface)', border: '1px solid var(--border)',
+              borderRadius: 'var(--radius)', cursor: 'pointer', color: 'var(--text)',
             }}
           >
-            {mode === 'login' ? 'Sign up' : 'Sign in'}
+            <svg width="18" height="18" viewBox="0 0 48 48">
+              <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
+              <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
+              <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
+              <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.18 1.48-4.97 2.31-8.16 2.31-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
+            </svg>
+            Continue with Google
           </button>
-        </p>
+        </a>
+
       </div>
     </div>
   );

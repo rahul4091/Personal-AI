@@ -1,7 +1,9 @@
 // server/services/users.js
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import { dbCreateUser, dbFindByUsername, dbFindById, dbUpdateEmail, dbUpdatePasswordHash, dbDeleteUser } from './db.js';
+import { dbCreateUser, dbFindByUsername, dbFindById, dbUpdateEmail, dbUpdatePasswordHash, dbDeleteUser, dbFindByGoogleId, dbFindByEmail, dbLinkGoogleId, dbCreateGoogleUser } from './db.js';
+
+export { dbFindByGoogleId, dbFindByEmail, dbLinkGoogleId, dbCreateGoogleUser };
 
 const JWT_SECRET = process.env.JWT_SECRET ?? (() => {
   console.warn('[auth] JWT_SECRET not set — tokens will invalidate on server restart');
@@ -27,6 +29,7 @@ export async function loginUser(username, password) {
 
   // Handle both Postgres (snake_case) and JSON file (camelCase) schemas
   const hash = user.password_hash ?? user.passwordHash;
+  if (hash === 'GOOGLE_AUTH_ONLY') throw new Error('This account uses Google sign-in. Click "Continue with Google" below.');
   const ok   = await bcrypt.compare(password, hash);
   if (!ok) throw new Error('Invalid username or password');
 
