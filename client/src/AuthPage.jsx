@@ -1,11 +1,14 @@
 import { useState } from 'react';
 
 export default function AuthPage({ onAuth }) {
-  const mode = 'login'; // signup disabled — re-enable later
+  const mode = 'login';
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
-  const [error,    setError]    = useState('');
   const [loading,  setLoading]  = useState(false);
+  const params = new URLSearchParams(window.location.search);
+  const [error, setError] = useState(
+    params.get('auth_error') === 'google_failed' ? 'Google sign-in failed. Please try again.' : ''
+  );
 
   async function handleSubmit(e) {
     e.preventDefault();

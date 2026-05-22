@@ -10,6 +10,9 @@ const __dirname  = path.dirname(fileURLToPath(import.meta.url));
 const TOKEN_PATH = path.join(__dirname, '..', 'tokens.json');
 
 const SCOPES = [
+  'openid',
+  'email',
+  'profile',
   'https://www.googleapis.com/auth/gmail.modify',
   'https://www.googleapis.com/auth/gmail.compose',
   'https://www.googleapis.com/auth/gmail.send',
