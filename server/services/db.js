@@ -19,9 +19,21 @@ export async function initDB() {
   try {
     const { default: pkg } = await import('pg');
     const Pool = pkg.Pool ?? pkg;
+    // Neon (and most hosted Postgres) requires SSL.
+    // rejectUnauthorized:false works everywhere; for Neon the cert is valid so
+    // we can set it to true when the URL contains neon.tech.
+    const isNeon = process.env.DATABASE_URL.includes('neon.tech');
+    // Add uselibpqcompat to silence pg's SSL deprecation warning on Neon URLs
+    const connStr = isNeon && !process.env.DATABASE_URL.includes('uselibpqcompat')
+      ? process.env.DATABASE_URL.replace('sslmode=require', 'sslmode=require&uselibpqcompat=true')
+      : process.env.DATABASE_URL;
     pool = new Pool({
-      connectionString: process.env.DATABASE_URL,
-      ssl: { rejectUnauthorized: false },
+      connectionString: connStr,
+      ssl: isNeon ? { rejectUnauthorized: true } : { rejectUnauthorized: false },
+      // Neon serverless connections can be idle-dropped — keep pool small
+      max: isNeon ? 5 : 10,
+      idleTimeoutMillis: isNeon ? 10000 : 30000,
+      connectionTimeoutMillis: 5000,
     });
 
     // ── Users table ───────────────────────────────────────────────────────────
@@ -55,7 +67,7 @@ export async function initDB() {
       )
     `);
 
-    console.log('[db] Postgres connected — schema ready (users + user_integrations)');
+    console.log(`[db] ${isNeon ? 'Neon' : 'Postgres'} connected — schema ready (users + user_integrations)`);
   } catch (err) {
     console.error('[db] Postgres init failed:', err.message, '— falling back to JSON store');
     pool = null;

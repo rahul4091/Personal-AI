@@ -114,12 +114,21 @@ function GoogleStep({ onNext }) {
           className="primary"
           style={{ width: '100%', padding: '10px 16px' }}
           onClick={async () => {
-            const token = localStorage.getItem('devos_token');
-            const r = await fetch('/api/auth/google/init', {
-              headers: { Authorization: `Bearer ${token}` },
-            });
-            const { url } = await r.json();
-            window.location.href = url;
+            try {
+              const token = localStorage.getItem('devos_token');
+              const r = await fetch('/api/auth/google/init', {
+                headers: { Authorization: `Bearer ${token}` },
+              });
+              if (!r.ok) {
+                if (r.status === 401) {
+                  localStorage.removeItem('devos_token');
+                  window.location.reload();
+                }
+                return;
+              }
+              const data = await r.json();
+              if (data.url) window.location.href = data.url;
+            } catch { /* network error */ }
           }}
         >
           Connect Gmail &amp; Calendar
@@ -137,11 +146,10 @@ function GoogleStep({ onNext }) {
 
 function ToolsStep({ onNext }) {
   const tools = [
-    { name: 'Notion',   desc: 'Tasks and notes database' },
-    { name: 'GitHub',   desc: 'PRs, issues, and code activity' },
-    { name: 'Slack',    desc: 'Team alerts and daily digests' },
-    { name: 'Trello',   desc: 'Board cards and stale card scan' },
-    { name: 'LinkedIn', desc: 'Post content via webhook' },
+    { name: 'Todoist / Notion', desc: 'Task management — create and track your to-dos' },
+    { name: 'GitHub',           desc: 'PRs, issues, and code activity' },
+    { name: 'Slack',            desc: 'Team alerts and daily digests' },
+    { name: 'Trello',           desc: 'Board cards and stale card scan' },
   ];
 
   return (
@@ -149,9 +157,12 @@ function ToolsStep({ onNext }) {
       <div style={{ marginBottom: 8 }}>
         <span className="t-eyebrow">Step 2 of 2</span>
       </div>
-      <h2 style={{ margin: '0 0 8px', fontSize: 20, fontWeight: 600 }}>More integrations</h2>
-      <p style={{ color: 'var(--muted)', fontSize: 'var(--fs-base)', lineHeight: 'var(--lh-loose)', margin: '0 0 16px' }}>
-        Connect these tools from Settings — just paste your API keys directly inside DevOS. No environment variables needed.
+      <h2 style={{ margin: '0 0 8px', fontSize: 20, fontWeight: 600 }}>All optional from here</h2>
+      <p style={{ color: 'var(--muted)', fontSize: 'var(--fs-base)', lineHeight: 'var(--lh-loose)', margin: '0 0 4px' }}>
+        The app is fully working now. These extra tools unlock more features — add them any time from Settings.
+      </p>
+      <p style={{ color: 'var(--muted)', fontSize: 'var(--fs-sm)', margin: '0 0 16px' }}>
+        Just paste an API key. No technical setup needed.
       </p>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 28 }}>
@@ -159,11 +170,12 @@ function ToolsStep({ onNext }) {
           <div
             key={t.name}
             style={{
-              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+              display: 'flex', alignItems: 'center', gap: 12,
               padding: '9px 12px', borderRadius: 'var(--radius)',
               border: 'var(--border-hairline)', background: 'var(--bg)',
             }}
           >
+            <span style={{ fontSize: 13, color: 'var(--hint)' }}>○</span>
             <div>
               <div style={{ fontWeight: 500, fontSize: 'var(--fs-base)' }}>{t.name}</div>
               <div style={{ fontSize: 'var(--fs-sm)', color: 'var(--muted)' }}>{t.desc}</div>

@@ -15,35 +15,40 @@ export function isConfigured(creds = {}) {
 }
 
 function formatTask(t) {
+  const done = t.is_completed ?? t.checked ?? false;
   return {
-    id:     t.id,
-    title:  t.content,
-    status: t.checked ? 'Done' : 'Not started',
-    source: 'todoist',
+    id:         t.id,
+    title:      t.content,
+    status:     done ? 'Done' : 'Not started',
+    source:     'todoist',
+    due:        t.due?.date ?? null,           // 'YYYY-MM-DD' or null
+    priority:   t.priority ?? 1,              // 1=normal 2=medium 3=high 4=urgent
+    project_id: t.project_id ?? null,
+    labels:     t.labels ?? [],
   };
 }
 
 export async function createTask(title, dueDateString = 'today', creds = {}) {
-  if (!isConfigured(creds)) return null;
-  try {
-    const res = await fetch(`${BASE}/tasks`, {
-      method:  'POST',
-      headers: headers(creds),
-      body:    JSON.stringify({ content: title, due_string: dueDateString }),
-    });
-    if (!res.ok) throw new Error(`Todoist ${res.status}: ${await res.text()}`);
-    return formatTask(await res.json());
-  } catch (err) {
-    console.error('[todoist] createTask:', err.message);
-    return null;
+  if (!isConfigured(creds)) throw new Error('Todoist API key not configured');
+  const body = { content: title };
+  if (dueDateString) body.due_string = dueDateString;
+  const res = await fetch(`${BASE}/tasks`, {
+    method:  'POST',
+    headers: headers(creds),
+    body:    JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`Todoist error ${res.status}: ${text || 'unknown error'}`);
   }
+  return formatTask(await res.json());
 }
 
 export async function getTasks(filter = 'today | overdue', creds = {}) {
   if (!isConfigured(creds)) return [];
   try {
     const res = await fetch(`${BASE}/tasks?filter=${encodeURIComponent(filter)}`, { headers: headers(creds) });
-    if (!res.ok) throw new Error(`Todoist ${res.status}`);
+    if (!res.ok) throw new Error(`Todoist ${res.status}: ${await res.text().catch(() => '')}`);
     const data = await res.json();
     const tasks = Array.isArray(data) ? data : (data.results ?? []);
     return tasks.map(formatTask);

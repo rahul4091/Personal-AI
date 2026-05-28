@@ -5,8 +5,9 @@ function getClient(creds = {}) {
   return new Client({ auth: creds.NOTION_API_KEY });
 }
 
-function tasksDb(creds = {}) { return creds.NOTION_TASKS_DB_ID; }
-function notesDb(creds = {}) { return creds.NOTION_NOTES_DB_ID; }
+// Fall back to notes DB if tasks DB isn't set — user may use one DB for everything
+function tasksDb(creds = {}) { return creds.NOTION_TASKS_DB_ID ?? creds.NOTION_NOTES_DB_ID; }
+function notesDb(creds = {}) { return creds.NOTION_NOTES_DB_ID ?? creds.NOTION_TASKS_DB_ID; }
 
 // ─── Tasks ────────────────────────────────────────────────────────────────────
 

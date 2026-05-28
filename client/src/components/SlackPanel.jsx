@@ -1,6 +1,8 @@
 import { useState } from 'react';
+import { apiFetch } from '../api.js';
+import NotConnected from './NotConnected.jsx';
 
-export default function SlackPanel({ health = {} }) {
+export default function SlackPanel({ health = {}, onGoToSettings }) {
   const [message,  setMessage]  = useState('');
   const [log,      setLog]      = useState([]);
   const [loading,  setLoading]  = useState('');
@@ -12,9 +14,8 @@ export default function SlackPanel({ health = {} }) {
     if (!message.trim()) return;
     setLoading('dm');
     try {
-      const r = await fetch('/api/slack/send', {
+      const r = await apiFetch('/api/slack/send', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: message }),
       });
       const data = await r.json();
@@ -32,7 +33,7 @@ export default function SlackPanel({ health = {} }) {
   async function runDigest() {
     setLoading('digest');
     try {
-      const r = await fetch('/api/digest/run', { method: 'POST' });
+      const r = await apiFetch('/api/digest/run', { method: 'POST' });
       const data = await r.json();
       setDigest(data);
     } finally { setLoading(''); }
@@ -40,20 +41,13 @@ export default function SlackPanel({ health = {} }) {
 
   if (!connected) return (
     <div>
-      <h2 style={{ fontSize: 16, fontWeight: 500, marginBottom: 16 }}>Slack</h2>
-      <div style={{ background: 'var(--surface)', border: '0.5px solid var(--border)', borderRadius: 'var(--radius)', padding: 16 }}>
-        <p style={{ fontSize: 13, fontWeight: 500, marginBottom: 8 }}>Not connected</p>
-        <p style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 1.7 }}>
-          Add these to your <code>.env</code> and restart:
-        </p>
-        <pre style={{ fontSize: 12, background: 'var(--bg)', padding: 10, borderRadius: 6, marginTop: 8, lineHeight: 1.8 }}>
-{`SLACK_BOT_TOKEN=xoxb-your-token
-SLACK_USER_ID=your_slack_user_id`}
-        </pre>
-        <p style={{ fontSize: 12, color: 'var(--muted)', marginTop: 8 }}>
-          Get a bot token at <strong>api.slack.com → Your Apps → OAuth & Permissions</strong>. Add <code>chat:write</code> scope. Find your user ID in Slack profile → More → Copy member ID.
-        </p>
-      </div>
+      <h2 style={{ fontSize: 16, fontWeight: 500, marginBottom: 4 }}>Slack</h2>
+      <NotConnected
+        title="Slack not connected"
+        description="Add your Slack bot token in Settings to send messages, run team digests, and get alerts."
+        primaryLabel="Go to Settings"
+        onPrimary={onGoToSettings}
+      />
     </div>
   );
 

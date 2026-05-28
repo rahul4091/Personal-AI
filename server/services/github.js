@@ -304,4 +304,98 @@ export async function closePR(prNumber, repoHint, creds = {}) {
   return { id: data.number, title: data.title, state: data.state, url: data.html_url, repo };
 }
 
-export default { isConfigured, getRepos, getOpenPRs, scanStalePRs, getMergedPRs, getIssues, createIssue, deleteIssue, closeIssue, reopenIssue, updateIssue, commentOnIssue, closePR, generateChangelog };
+// ─── Contributions (last 30 days via user events) ─────────────────────────────
+
+export async function getContributions(repoHint, creds = {}) {
+  const repos = getRepos(creds);
+  if (!repos.length) return null;
+  const owner   = repos[0].split('/')[0];
+  const since30 = new Date(Date.now() - 30 * 86400000).toISOString();
+
+  const events = await ghFetch(`/users/${owner}/events?per_page=100`, creds);
+  if (!events) return { totalCommits: 0, dailyActivity: [], streak: 0, prsOpened: 0, reviewsDone: 0 };
+
+  const recentEvents = events.filter(e => e.created_at > since30);
+
+  // Daily commit map
+  const dailyMap = {};
+  let totalCommits = 0;
+  for (const e of recentEvents) {
+    if (e.type !== 'PushEvent') continue;
+    const day   = e.created_at.slice(0, 10);
+    const count = e.payload?.commits?.length ?? 1;
+    dailyMap[day] = (dailyMap[day] || 0) + count;
+    totalCommits += count;
+  }
+
+  // Build 30-day array (oldest → newest)
+  const days = [];
+  for (let i = 29; i >= 0; i--) {
+    const d   = new Date(Date.now() - i * 86400000);
+    const key = d.toISOString().slice(0, 10);
+    days.push({ date: key, count: dailyMap[key] || 0 });
+  }
+
+  // Streak = consecutive active days backwards from today
+  let streak = 0;
+  for (let i = days.length - 1; i >= 0; i--) {
+    if (days[i].count > 0) streak++;
+    else break;
+  }
+
+  return {
+    totalCommits,
+    dailyActivity: days,
+    streak,
+    prsOpened:   recentEvents.filter(e => e.type === 'PullRequestEvent' && e.payload?.action === 'opened').length,
+    reviewsDone: recentEvents.filter(e => e.type === 'PullRequestReviewEvent').length,
+    author: owner,
+  };
+}
+
+// ─── Branches with stale detection ───────────────────────────────────────────
+
+export async function getBranches(repoHint, creds = {}) {
+  const repo = resolveRepo(repoHint, creds);
+  if (!repo) return [];
+
+  const branches = await ghFetch(`/repos/${repo}/branches?per_page=50`, creds);
+  if (!branches) return [];
+
+  const now = Date.now();
+
+  // Fetch last commit date for each branch in parallel (capped at 30)
+  const results = await Promise.all(branches.slice(0, 30).map(async b => {
+    try {
+      const commits = await ghFetch(
+        `/repos/${repo}/commits?sha=${encodeURIComponent(b.name)}&per_page=1`,
+        creds
+      );
+      const latest  = commits?.[0];
+      const date    = latest?.commit?.committer?.date ?? latest?.commit?.author?.date ?? null;
+      const daysOld = date ? Math.floor((now - new Date(date)) / 86400000) : null;
+      return {
+        name:      b.name,
+        sha:       b.commit.sha.slice(0, 7),
+        protected: b.protected,
+        lastCommit: date,
+        daysOld,
+        stale:     daysOld !== null && daysOld >= 14,
+        isDefault: b.name === 'main' || b.name === 'master',
+      };
+    } catch {
+      return { name: b.name, sha: b.commit.sha.slice(0, 7), protected: b.protected, lastCommit: null, daysOld: null, stale: false, isDefault: false };
+    }
+  }));
+
+  // Default branch first, then most recent activity
+  return results.sort((a, b) => {
+    if (a.isDefault) return -1;
+    if (b.isDefault) return 1;
+    if (a.daysOld === null) return 1;
+    if (b.daysOld === null) return -1;
+    return a.daysOld - b.daysOld;
+  });
+}
+
+export default { isConfigured, getRepos, getOpenPRs, scanStalePRs, getMergedPRs, getIssues, createIssue, deleteIssue, closeIssue, reopenIssue, updateIssue, commentOnIssue, closePR, generateChangelog, getContributions, getBranches };

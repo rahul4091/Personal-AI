@@ -1,10 +1,12 @@
 // server/index.js
+import tracing    from './services/tracing.js'; // FIRST — sets LangSmith env before any LangChain module loads
 import crypto     from 'crypto';
 import express    from 'express';
 import cors       from 'cors';
 import cron       from 'node-cron';
 import { fileURLToPath } from 'url';
 import path       from 'path';
+import fs         from 'fs';
 
 import llm        from './services/llm.js';
 import notion     from './services/notion.js';
@@ -17,9 +19,10 @@ import trello     from './services/trello.js';
 import content    from './services/content.js';
 import todoist    from './services/todoist.js';
 import auth       from './services/auth.js';
-import { initDB } from './services/db.js';
+import { initDB, getPool } from './services/db.js';
 import * as userService from './services/users.js';
 import * as integrations from './services/integrations.js';
+import langchainAgent from './services/langchain-agent.js';
 import OpenAI from 'openai';
 
 const app  = express();
@@ -40,19 +43,24 @@ app.use(express.json());
 
 app.get('/api/health', requireAuth, async (req, res) => {
   const creds = await getUserCreds(req.user.userId);
-  const googleConnectedId = auth.getConnectedUserId();
-  const googleForUser = auth.isConnected() && (googleConnectedId === null || googleConnectedId === req.user.userId);
+  const googleForUser = auth.isConnected(req.user.userId);
+  // Shared = admin set the key in .env so all users inherit it
+  const geminiShared = !!process.env.GEMINI_API_KEY;
+  const groqShared   = !!process.env.GROQ_API_KEY;
   res.json({
-    ok:       true,
-    google:   googleForUser,
-    gemini:   !!(creds.GEMINI_API_KEY),
-    groq:     !!(creds.GROQ_API_KEY),
-    notion:   !!(creds.NOTION_API_KEY),
-    slack:    !!(creds.SLACK_BOT_TOKEN),
-    github:   github.isConfigured(creds),
-    trello:   !!(creds.TRELLO_API_KEY),
-    todoist:  !!(creds.TODOIST_API_KEY),
-    linkedin: !!(creds.LINKEDIN_WEBHOOK_URL),
+    ok:           true,
+    google:       googleForUser,
+    gemini:       !!(creds.GEMINI_API_KEY) || geminiShared,
+    groq:         !!(creds.GROQ_API_KEY)   || groqShared,
+    geminiShared, // true = running on admin's key, user hasn't added their own
+    groqShared,
+    notion:       !!(creds.NOTION_API_KEY),
+    slack:        !!(creds.SLACK_BOT_TOKEN),
+    github:       github.isConfigured(creds),
+    trello:       !!(creds.TRELLO_API_KEY),
+    todoist:      !!(creds.TODOIST_API_KEY),
+    linkedin:     !!(creds.LINKEDIN_WEBHOOK_URL),
+    tracing:      tracing.tracingStatus().enabled,
   });
 });
 
@@ -70,10 +78,26 @@ app.get('/api/auth/google/signin', (req, res) => {
   res.redirect(auth.getAuthUrl('mode:signin'));
 });
 
-// Legacy redirect — kept for backwards compat but no userId tracking
+// Legacy redirect — now requires auth and delegates to /api/auth/google/init so userId is in state
 app.get('/api/auth/google', (req, res) => {
-  const state = req.query.from === 'settings' ? 'from:settings' : '';
-  res.redirect(auth.getAuthUrl(state));
+  const header = req.headers.authorization;
+  if (!header?.startsWith('Bearer ')) {
+    const frontendURL = process.env.RAILWAY_PUBLIC_DOMAIN
+      ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+      : (process.env.APP_URL ?? 'http://localhost:5173');
+    return res.redirect(`${frontendURL}/`);
+  }
+  try {
+    const payload = userService.verifyToken(header.slice(7));
+    const fromSettings = req.query.from === 'settings';
+    const state = `uid:${payload.userId}${fromSettings ? ':from:settings' : ''}`;
+    res.redirect(auth.getAuthUrl(state));
+  } catch {
+    const frontendURL = process.env.RAILWAY_PUBLIC_DOMAIN
+      ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+      : (process.env.APP_URL ?? 'http://localhost:5173');
+    return res.redirect(`${frontendURL}/`);
+  }
 });
 
 app.get('/api/auth/google/callback', async (req, res) => {
@@ -121,7 +145,7 @@ app.get('/api/auth/google/callback', async (req, res) => {
       }
 
       // Save Google tokens linked to this user, then redirect with JWT
-      auth.saveTokens(tokens, user.id);
+      await auth.saveTokens(tokens, user.id);
       const token = userService.signToken({ id: user.id, username: user.username });
       return res.redirect(`${frontendURL}/?google_token=${token}`);
     }
@@ -129,7 +153,7 @@ app.get('/api/auth/google/callback', async (req, res) => {
     // ── Connect Google to an existing logged-in account ───────────────────────
     const uidMatch = stateStr.match(/uid:(\d+)/);
     const userId   = uidMatch ? parseInt(uidMatch[1], 10) : null;
-    auth.saveTokens(tokens, userId);
+    await auth.saveTokens(tokens, userId);
     const fromSettings = stateStr.includes('from:settings');
     res.redirect(`${frontendURL}${fromSettings ? '/settings?google_connected=true' : '/?connected=true'}`);
   } catch (err) {
@@ -140,10 +164,11 @@ app.get('/api/auth/google/callback', async (req, res) => {
 
 // Returns the Gmail address — only for the user who connected Google
 app.get('/api/auth/google/email', requireAuth, async (req, res) => {
-  if (!auth.isConnected() || !isGoogleUser(req)) return res.json({ connected: false, email: null });
+  const uid = req.user.userId;
+  if (!auth.isConnected(uid)) return res.json({ connected: false, email: null });
   try {
     const { google: googleapis } = await import('googleapis');
-    const client = auth.getAuthClient();
+    const client = await auth.getAuthClient(uid);
     const gmail  = googleapis.gmail({ version: 'v1', auth: client });
     const profile = await gmail.users.getProfile({ userId: 'me' });
     res.json({ connected: true, email: profile.data.emailAddress });
@@ -152,15 +177,22 @@ app.get('/api/auth/google/email', requireAuth, async (req, res) => {
   }
 });
 
-app.get('/api/auth/status', (req, res) => {
-  res.json({ connected: auth.isConnected() });
+app.get('/api/auth/status', requireAuth, (req, res) => {
+  res.json({ connected: auth.isConnected(req.user.userId) });
 });
 
 // ─── User account routes ───────────────────────────────────────────────────────
 
 // Signup disabled — re-enable when ready
-app.post('/api/auth/signup', (req, res) => {
-  res.status(403).json({ error: 'Sign-up is currently closed.' });
+app.post('/api/auth/signup', async (req, res) => {
+  try {
+    const { username, password, email } = req.body;
+    const user  = await userService.createUser(username, password, email);
+    const token = userService.signToken(user);
+    res.json({ token, user: { id: user.id, username: user.username, email: user.email } });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
 });
 
 app.post('/api/auth/login', async (req, res) => {
@@ -253,6 +285,21 @@ app.delete('/api/integrations/:service', requireAuth, async (req, res) => {
 // ─── Credential test + save endpoint ──────────────────────────────────────────
 // Tests the supplied credentials against the real API, and saves them only on success.
 
+// Extracts a plain 32-char Notion ID from whatever the user pasted (full URL or raw ID).
+function extractNotionId(input) {
+  if (!input?.trim()) return null;
+  const s = input.trim().replace(/-/g, '');           // strip dashes (UUID format)
+  const match = s.match(/[0-9a-f]{32}/i);             // find the first 32-char hex run
+  return match ? match[0] : null;
+}
+
+// Strips invisible Unicode chars that trim() misses: zero-width spaces, BOM, soft hyphens, etc.
+function sanitizeKey(raw) {
+  return (raw ?? '').trim()
+    .replace(/​/g, '').replace(/‌/g, '').replace(/‍/g, '')
+    .replace(/﻿/g, '').replace(/­/g, '').replace(/⁠/g, '');
+}
+
 app.post('/api/credentials/test/:service', requireAuth, async (req, res) => {
   const { service } = req.params;
   const body        = req.body ?? {};
@@ -262,122 +309,189 @@ app.post('/api/credentials/test/:service', requireAuth, async (req, res) => {
     switch (service) {
 
       case 'gemini': {
-        if (!body.key?.trim()) return res.status(400).json({ ok: false, error: 'API key is required' });
+        const geminiKey = sanitizeKey(body.key);
+        if (!geminiKey) return res.status(400).json({ ok: false, error: 'API key is required' });
+        if (!geminiKey.startsWith('AIza')) return res.status(400).json({ ok: false, error: 'Invalid format. Gemini keys start with AIza — get one at aistudio.google.com/apikey.' });
         const client = new OpenAI({
-          apiKey:  body.key.trim(),
+          apiKey:  geminiKey,
           baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/',
         });
-        await client.chat.completions.create({
-          model:    'gemini-2.0-flash',
-          messages: [{ role: 'user', content: 'Reply with the single word OK' }],
-          max_tokens: 5,
-        });
-        await integrations.saveKey(uid, 'gemini', 'GEMINI_API_KEY', body.key.trim());
+        try {
+          await client.chat.completions.create({
+            model:    'gemini-2.0-flash',
+            messages: [{ role: 'user', content: 'Reply with the single word OK' }],
+            max_tokens: 10,
+          });
+        } catch (apiErr) {
+          const msg = apiErr?.error?.error?.message || apiErr?.message || 'Gemini API request failed';
+          return res.status(400).json({ ok: false, error: `Gemini: ${msg}` });
+        }
+        await integrations.saveKey(uid, 'gemini', 'GEMINI_API_KEY', geminiKey);
         return res.json({ ok: true });
       }
 
       case 'groq': {
-        if (!body.key?.trim()) return res.status(400).json({ ok: false, error: 'API key is required' });
+        const groqKey = sanitizeKey(body.key);
+        if (!groqKey) return res.status(400).json({ ok: false, error: 'API key is required' });
+        if (!groqKey.startsWith('gsk_')) return res.status(400).json({ ok: false, error: 'Invalid format. Groq keys start with gsk_ — get one at console.groq.com/keys.' });
         const client = new OpenAI({
-          apiKey:  body.key.trim(),
+          apiKey:  groqKey,
           baseURL: 'https://api.groq.com/openai/v1',
         });
-        await client.chat.completions.create({
-          model:    'llama-3.1-8b-instant',
-          messages: [{ role: 'user', content: 'Reply with the single word OK' }],
-          max_tokens: 5,
-        });
-        await integrations.saveKey(uid, 'groq', 'GROQ_API_KEY', body.key.trim());
+        try {
+          await client.chat.completions.create({
+            model:    'llama-3.1-8b-instant',
+            messages: [{ role: 'user', content: 'Reply with the single word OK' }],
+            max_tokens: 10,
+          });
+        } catch (apiErr) {
+          const msg = apiErr?.error?.error?.message || apiErr?.message || 'Groq API request failed';
+          return res.status(400).json({ ok: false, error: `Groq: ${msg}` });
+        }
+        await integrations.saveKey(uid, 'groq', 'GROQ_API_KEY', groqKey);
         return res.json({ ok: true });
       }
 
       case 'notion': {
-        const { apiKey, taskDbId, notesDbId } = body;
-        if (!apiKey?.trim()) return res.status(400).json({ ok: false, error: 'API key is required' });
-        // Test API key
+        const notionKey = sanitizeKey(body.apiKey);
+        const { taskDbId, notesDbId } = body;
+        console.log(`[notion/test] received key prefix="${notionKey.slice(0, 15)}" len=${notionKey.length}`);
+        if (!notionKey) return res.status(400).json({ ok: false, error: 'API key is required' });
+        if (!notionKey.startsWith('secret_') && !notionKey.startsWith('ntn_')) {
+          return res.status(400).json({ ok: false, error: `Wrong key format — server received "${notionKey.slice(0, 12)}…" (${notionKey.length} chars). Notion integration secrets start with secret_ or ntn_. Go to notion.so/my-integrations → open your integration → copy the Internal Integration Secret.` });
+        }
         const meResp = await fetch('https://api.notion.com/v1/users/me', {
-          headers: { 'Authorization': `Bearer ${apiKey.trim()}`, 'Notion-Version': '2022-06-28' },
+          headers: { 'Authorization': `Bearer ${notionKey}`, 'Notion-Version': '2022-06-28' },
         });
+        console.log(`[notion/test] Notion /users/me status=${meResp.status}`);
         if (!meResp.ok) {
           const e = await meResp.json().catch(() => ({}));
-          return res.status(400).json({ ok: false, error: e.message || 'Invalid Notion API key' });
+          console.error('[notion/test] Notion error:', e);
+          const diag = `Server received: "${notionKey.slice(0, 12)}…" (${notionKey.length} chars). `;
+          const hint = e.code === 'unauthorized'
+            ? 'Notion rejected the token. It may have been regenerated or belongs to a deleted integration. Go to notion.so/my-integrations → open your integration → copy the latest secret.'
+            : `Notion error: ${e.message || meResp.status}`;
+          return res.status(400).json({ ok: false, error: diag + hint });
         }
         const notionUser = await meResp.json();
+        // Extract plain 32-char ID from a full Notion URL if the user pasted a URL
+        const resolvedTaskId  = extractNotionId(taskDbId);
+        const resolvedNotesId = extractNotionId(notesDbId);
         // Test DB IDs if provided
-        for (const [label, dbId] of [['Tasks', taskDbId], ['Notes', notesDbId]]) {
-          if (!dbId?.trim()) continue;
-          const dbResp = await fetch(`https://api.notion.com/v1/databases/${dbId.trim()}`, {
-            headers: { 'Authorization': `Bearer ${apiKey.trim()}`, 'Notion-Version': '2022-06-28' },
+        for (const [label, dbId] of [['Tasks', resolvedTaskId], ['Notes', resolvedNotesId]]) {
+          if (!dbId) continue;
+          const dbResp = await fetch(`https://api.notion.com/v1/databases/${dbId}`, {
+            headers: { 'Authorization': `Bearer ${notionKey}`, 'Notion-Version': '2022-06-28' },
           });
           if (!dbResp.ok) {
             const e = await dbResp.json().catch(() => ({}));
-            return res.status(400).json({ ok: false, error: `${label} database not found. Make sure you've shared it with your integration. ${e.message || ''}`.trim() });
+            const msg = e.code === 'object_not_found'
+              ? `${label} database not found. Open the database in Notion → click ··· → Connections → add your integration, then try again.`
+              : `${label} database error: ${e.message || dbResp.status}`;
+            return res.status(400).json({ ok: false, error: msg });
           }
         }
         // All passed — save
-        await integrations.saveKey(uid, 'notion', 'NOTION_API_KEY', apiKey.trim());
-        if (taskDbId?.trim())  await integrations.saveKey(uid, 'notion', 'NOTION_TASKS_DB_ID',  taskDbId.trim());
-        if (notesDbId?.trim()) await integrations.saveKey(uid, 'notion', 'NOTION_NOTES_DB_ID', notesDbId.trim());
+        await integrations.saveKey(uid, 'notion', 'NOTION_API_KEY', notionKey);
+        if (resolvedTaskId)  await integrations.saveKey(uid, 'notion', 'NOTION_TASKS_DB_ID',  resolvedTaskId);
+        if (resolvedNotesId) await integrations.saveKey(uid, 'notion', 'NOTION_NOTES_DB_ID', resolvedNotesId);
         return res.json({ ok: true, meta: { userName: notionUser.name } });
       }
 
       case 'github': {
         const { token, owner, repo } = body;
-        if (!token?.trim()) return res.status(400).json({ ok: false, error: 'Token is required' });
+        const ghToken = sanitizeKey(body.token);
+        const ghOwner = sanitizeKey(body.owner);
+        const ghRepo  = sanitizeKey(body.repo);
+        if (!ghToken) return res.status(400).json({ ok: false, error: 'Token is required' });
+        if (!ghOwner) return res.status(400).json({ ok: false, error: 'Username / org is required' });
+        if (!ghRepo)  return res.status(400).json({ ok: false, error: 'Repository name is required' });
+        if (!ghToken.startsWith('ghp_') && !ghToken.startsWith('gho_') && !ghToken.startsWith('github_pat_') && !/^[0-9a-f]{40}$/i.test(ghToken)) {
+          return res.status(400).json({ ok: false, error: 'Invalid token format. GitHub personal access tokens start with ghp_ (classic) or github_pat_ (fine-grained). Generate one at github.com/settings/tokens.' });
+        }
         const resp = await fetch('https://api.github.com/user', {
-          headers: { 'Authorization': `token ${token.trim()}`, 'Accept': 'application/vnd.github.v3+json' },
+          headers: {
+            'Authorization': `Bearer ${ghToken}`,
+            'Accept': 'application/vnd.github+json',
+            'X-GitHub-Api-Version': '2022-11-28',
+          },
         });
-        if (!resp.ok) return res.status(400).json({ ok: false, error: 'Invalid GitHub token' });
+        if (!resp.ok) {
+          const e = await resp.json().catch(() => ({}));
+          return res.status(400).json({ ok: false, error: e.message || `GitHub returned ${resp.status}` });
+        }
         const ghUser = await resp.json();
-        await integrations.saveKey(uid, 'github', 'GITHUB_TOKEN', token.trim());
-        if (owner?.trim()) await integrations.saveKey(uid, 'github', 'GITHUB_OWNER', owner.trim());
-        if (repo?.trim())  await integrations.saveKey(uid, 'github', 'GITHUB_REPO',  repo.trim());
+        await integrations.saveKey(uid, 'github', 'GITHUB_TOKEN', ghToken);
+        await integrations.saveKey(uid, 'github', 'GITHUB_OWNER', ghOwner);
+        await integrations.saveKey(uid, 'github', 'GITHUB_REPO',  ghRepo);
         return res.json({ ok: true, meta: { username: ghUser.login } });
       }
 
       case 'trello': {
-        const { apiKey, token, boardId } = body;
-        if (!apiKey?.trim() || !token?.trim()) return res.status(400).json({ ok: false, error: 'API key and token are required' });
+        const trelloKey   = sanitizeKey(body.apiKey);
+        const trelloToken = sanitizeKey(body.token);
+        const trelloBoardId = sanitizeKey(body.boardId);
+        if (!trelloKey || !trelloToken) return res.status(400).json({ ok: false, error: 'API key and token are required' });
         const resp = await fetch(
-          `https://api.trello.com/1/members/me?key=${encodeURIComponent(apiKey.trim())}&token=${encodeURIComponent(token.trim())}&boards=open`
+          `https://api.trello.com/1/members/me?key=${encodeURIComponent(trelloKey)}&token=${encodeURIComponent(trelloToken)}&boards=open`
         );
-        if (!resp.ok) return res.status(400).json({ ok: false, error: 'Invalid Trello API key or token' });
+        if (!resp.ok) {
+          const e = await resp.text().catch(() => '');
+          return res.status(400).json({ ok: false, error: e || `Trello returned ${resp.status}` });
+        }
         const trelloUser = await resp.json();
-        if (boardId?.trim()) {
+        if (trelloBoardId) {
           const boards = trelloUser.boards ?? [];
-          const found  = boards.find(b => b.id === boardId.trim() || b.shortLink === boardId.trim());
+          const found  = boards.find(b => b.id === trelloBoardId || b.shortLink === trelloBoardId);
           if (!found) {
             const names = boards.map(b => b.name).join(', ') || 'none';
             return res.status(400).json({ ok: false, error: `Board not found. Your boards: ${names}` });
           }
-          await integrations.saveKey(uid, 'trello', 'TRELLO_BOARD_ID', boardId.trim());
+          await integrations.saveKey(uid, 'trello', 'TRELLO_BOARD_ID', trelloBoardId);
         }
-        await integrations.saveKey(uid, 'trello', 'TRELLO_API_KEY', apiKey.trim());
-        await integrations.saveKey(uid, 'trello', 'TRELLO_TOKEN',   token.trim());
+        await integrations.saveKey(uid, 'trello', 'TRELLO_API_KEY', trelloKey);
+        await integrations.saveKey(uid, 'trello', 'TRELLO_TOKEN',   trelloToken);
         return res.json({ ok: true, meta: { fullName: trelloUser.fullName } });
       }
 
       case 'slack': {
-        const { botToken, userId: slackUserId } = body;
-        if (!botToken?.trim()) return res.status(400).json({ ok: false, error: 'Bot token is required' });
+        const slackToken  = sanitizeKey(body.botToken);
+        const slackUserId = sanitizeKey(body.userId);
+        if (!slackToken) return res.status(400).json({ ok: false, error: 'Bot token is required' });
+        if (!slackToken.startsWith('xoxb-')) return res.status(400).json({ ok: false, error: 'Invalid format. Slack bot tokens start with xoxb- — get one at api.slack.com/apps → OAuth & Permissions.' });
         const resp = await fetch('https://slack.com/api/auth.test', {
           method:  'POST',
-          headers: { 'Authorization': `Bearer ${botToken.trim()}`, 'Content-Type': 'application/json' },
+          headers: { 'Authorization': `Bearer ${slackToken}`, 'Content-Type': 'application/json' },
         });
         const data = await resp.json();
         if (!data.ok) return res.status(400).json({ ok: false, error: data.error || 'Invalid Slack token' });
-        await integrations.saveKey(uid, 'slack', 'SLACK_BOT_TOKEN', botToken.trim());
-        if (slackUserId?.trim()) await integrations.saveKey(uid, 'slack', 'SLACK_USER_ID', slackUserId.trim());
+        await integrations.saveKey(uid, 'slack', 'SLACK_BOT_TOKEN', slackToken);
+        if (slackUserId) await integrations.saveKey(uid, 'slack', 'SLACK_USER_ID', slackUserId);
         return res.json({ ok: true, meta: { teamName: data.team, botName: data.user } });
       }
 
       case 'linkedin': {
-        const { webhookUrl } = body;
-        if (!webhookUrl?.trim()) return res.status(400).json({ ok: false, error: 'Webhook URL is required' });
-        if (!webhookUrl.trim().startsWith('https://')) {
+        const webhookUrl = sanitizeKey(body.webhookUrl);
+        if (!webhookUrl) return res.status(400).json({ ok: false, error: 'Webhook URL is required' });
+        if (!webhookUrl.startsWith('https://')) {
           return res.status(400).json({ ok: false, error: 'Webhook URL must start with https://' });
         }
-        await integrations.saveKey(uid, 'linkedin', 'LINKEDIN_WEBHOOK_URL', webhookUrl.trim());
+        await integrations.saveKey(uid, 'linkedin', 'LINKEDIN_WEBHOOK_URL', webhookUrl);
+        return res.json({ ok: true });
+      }
+
+      case 'todoist': {
+        const todoistKey = sanitizeKey(body.key);
+        if (!todoistKey) return res.status(400).json({ ok: false, error: 'API key is required' });
+        if (todoistKey.length < 20) return res.status(400).json({ ok: false, error: 'Key looks too short. Paste the full API token from Todoist → Settings → Integrations → Developer.' });
+        const resp = await fetch('https://api.todoist.com/api/v1/tasks', {
+          headers: { Authorization: `Bearer ${todoistKey}` },
+        });
+        if (!resp.ok) {
+          const e = await resp.json().catch(() => ({}));
+          return res.status(400).json({ ok: false, error: e.error || e.message || `Todoist returned ${resp.status}` });
+        }
+        await integrations.saveKey(uid, 'todoist', 'TODOIST_API_KEY', todoistKey);
         return res.json({ ok: true });
       }
 
@@ -451,6 +565,9 @@ function buildDateAnchors() {
 function buildRoutingRules() {
   return `
 ROUTING RULES (follow exactly):
+- "what do I have today / what's on today / show my day / what's my schedule" → TWO actions: get_calendar AND get_tasks (both in the actions array)
+- "show my calendar / upcoming events / what meetings do I have" → intent:get_calendar
+- "show my tasks / open tasks / todo list" → intent:get_tasks
 - "add task / todo / reminder" → intent:add_task → Todoist only
 - "add note / write note / save note" → intent:create_note → Notion only
 - "read emails from <date>" → intent:get_emails_range, resolve dates using anchors: ${buildDateAnchors()}
@@ -470,7 +587,8 @@ ROUTING RULES (follow exactly):
 - "update issue #N title/body/labels" → intent:update_issue, taskId:N, title/body/labels, repo
 - "comment on issue #N: ..." → intent:comment_issue, taskId:N, body:comment, repo
 - "close PR #N / delete PR #N" → intent:close_pr, taskId:N, repo
-- NEVER respond with general_chat for any GitHub issue/PR action — always use the correct intent`.trim();
+- NEVER respond with general_chat for any GitHub issue/PR action — always use the correct intent
+- NEVER respond with general_chat when the user asks about their calendar, tasks, emails, or PRs — always use the correct data-fetching intent`.trim();
 }
 
 // ─── Date resolver ───────────────────────────────────────────────────────────
@@ -553,16 +671,16 @@ function extractIssueBody(message, title) {
     .trim() || message;
 }
 
-async function executeAction(intent, params, originalMessage = '', creds = {}) {
+async function executeAction(intent, params, originalMessage = '', creds = {}, userId = null) {
   const apiKeys = { GEMINI_API_KEY: creds.GEMINI_API_KEY, GROQ_API_KEY: creds.GROQ_API_KEY };
 
   switch (intent) {
 
     case 'add_task': {
-      if (!params.title) return null;
-      if (todoist.isConfigured(creds)) return await todoist.createTask(params.title, 'today', creds);
-      if (notionReady(creds))          return await notion.createTask(params.title, 'Not started', creds);
-      return { error: 'No task service configured' };
+      if (!params.title?.trim()) return { error: 'Could not extract a task title from your message — please try again with a clear title.' };
+      if (todoist.isConfigured(creds)) return await todoist.createTask(params.title.trim(), 'today', creds);
+      if (notionReady(creds))          return await notion.createTask(params.title.trim(), 'Not started', creds);
+      return { error: 'No task service configured. Add a Todoist or Notion key in Settings.' };
     }
 
     case 'update_task': {
@@ -606,42 +724,42 @@ async function executeAction(intent, params, originalMessage = '', creds = {}) {
       return { notes: await notion.getNotes(creds) };
 
     case 'get_emails':
-      return { emails: await gmail.triageInbox(10) };
+      return { emails: await gmail.triageInbox(userId, 10) };
 
     case 'get_emails_range': {
       const { startDate, endDate } = params;
       if (!startDate) return { error: 'startDate is required' };
-      const emails = await gmail.getEmailsByDateRange(startDate, endDate ?? new Date().toISOString().slice(0, 10));
+      const emails = await gmail.getEmailsByDateRange(userId, startDate, endDate ?? new Date().toISOString().slice(0, 10));
       return { emails, count: emails.length, range: { startDate, endDate } };
     }
 
     case 'draft_email':
       if (params.to && params.body) {
-        return await gmail.createDraft(params.to, params.title ?? 'No subject', params.body);
+        return await gmail.createDraft(userId, params.to, params.title ?? 'No subject', params.body);
       }
       return null;
 
     case 'send_email':
       if (params.to && params.body) {
-        return await gmail.sendEmail(params.to, params.title ?? 'No subject', params.body);
+        return await gmail.sendEmail(userId, params.to, params.title ?? 'No subject', params.body);
       }
       return null;
 
     case 'archive_email':
-      return params.taskId ? await gmail.archiveEmail(params.taskId) : null;
+      return params.taskId ? await gmail.archiveEmail(userId, params.taskId) : null;
 
     case 'create_event': {
       if (!params.title) return { error: 'title is required' };
 
       if (params.recurring && params.days?.length && params.time) {
-        return await calendar.createRecurringEvent(params.title, params.days, params.time, params.duration ?? 60);
+        return await calendar.createRecurringEvent(userId, params.title, params.days, params.time, params.duration ?? 60);
       }
 
       if (params.date) {
         const resolved = resolveDate(params.date);
         if (!resolved) return { error: `Could not parse date "${params.date}". Use format: YYYY-MM-DDTHH:MM` };
         console.log(`[create_event] title="${params.title}" raw="${params.date}" resolved="${resolved}"`);
-        return await calendar.createEvent(params.title, resolved, params.duration ?? 60);
+        return await calendar.createEvent(userId, params.title, resolved, params.duration ?? 60);
       }
 
       return { error: 'Provide a date for a single event, or days + time for a recurring event.' };
@@ -650,7 +768,7 @@ async function executeAction(intent, params, originalMessage = '', creds = {}) {
     case 'delete_event': {
       const target = params.title || params.taskId;
       if (!target) return { error: 'Provide the event name to delete' };
-      return await calendar.deleteEvent(target);
+      return await calendar.deleteEvent(userId, target);
     }
 
     case 'update_event': {
@@ -660,17 +778,17 @@ async function executeAction(intent, params, originalMessage = '', creds = {}) {
       if (params.body)     patches.title    = params.body;
       if (params.date)     patches.date     = resolveDate(params.date) ?? params.date;
       if (params.duration) patches.duration = Number(params.duration);
-      return await calendar.updateEvent(target, patches);
+      return await calendar.updateEvent(userId, target, patches);
     }
 
     case 'get_calendar':
-      return { events: await calendar.getUpcoming(5) };
+      return { events: await calendar.getUpcoming(userId, 5) };
 
     case 'scan_conflicts':
-      return { conflicts: await calendar.scanConflicts() };
+      return { conflicts: await calendar.scanConflicts(userId) };
 
     case 'block_focus_time':
-      return { blocks: await calendar.blockFocusTime(params.title ?? 'Deep work') };
+      return { blocks: await calendar.blockFocusTime(userId, params.title ?? 'Deep work') };
 
     case 'get_prs':
       return { prs: await github.getOpenPRs(params.repo, creds), stale: await github.scanStalePRs(3, params.repo, creds) };
@@ -760,11 +878,11 @@ async function executeAction(intent, params, originalMessage = '', creds = {}) {
       return { cards: await trello.getCards(creds), stale: await trello.scanStaleCards(5, creds) };
 
     case 'run_digest':
-      runDigest().catch(console.error);
+      runDigest(userId).catch(console.error);
       return { triggered: true, message: 'Digest is running in the background.' };
 
     case 'get_digest':
-      return _cachedDigest ?? { message: 'No digest yet — run one first.' };
+      return _digestCache.get(String(userId)) ?? { message: 'No digest yet — run one first.' };
 
     case 'add_vip':
       return params.email ? { vips: memory.addVIP(params.email) } : null;
@@ -792,9 +910,94 @@ const EMAIL_ACTION_INTENTS    = new Set(['draft_email', 'send_email', 'get_email
 const DIGEST_ACTION_INTENTS   = new Set(['run_digest', 'get_digest']);
 const QUERY_INTENTS_SET       = new Set(['get_tasks','get_emails','get_emails_range','get_calendar','get_notes','get_prs','get_trello','get_digest','get_issues']);
 
+const ACTION_STATUS = {
+  add_task:         'Adding task…',
+  update_task:      'Updating task…',
+  delete_task:      'Deleting task…',
+  get_tasks:        'Fetching tasks…',
+  create_note:      'Creating note…',
+  get_notes:        'Fetching notes…',
+  draft_email:      'Drafting email…',
+  send_email:       'Sending email…',
+  get_emails:       'Checking inbox…',
+  get_emails_range: 'Fetching emails…',
+  archive_email:    'Archiving email…',
+  create_event:     'Creating calendar event…',
+  update_event:     'Updating event…',
+  delete_event:     'Deleting event…',
+  get_calendar:     'Checking calendar…',
+  scan_conflicts:   'Scanning for conflicts…',
+  block_focus_time: 'Blocking focus time…',
+  get_prs:          'Fetching pull requests…',
+  get_issues:       'Fetching issues…',
+  create_issue:     'Creating issue…',
+  close_issue:      'Closing issue…',
+  run_digest:       'Running digest…',
+  draft_linkedin:   'Drafting LinkedIn post…',
+  get_trello:       'Fetching Trello board…',
+  general_chat:     'Thinking…',
+};
+
+// ─── Deterministic pre-classifier ────────────────────────────────────────────
+// Intercepts common data-fetching patterns before the LLM classifier runs.
+// Returns a classified object (same shape as llm.classify) or null to fall through.
+
+function preClassify(message) {
+  const m = message.toLowerCase().trim();
+
+  const acts = (...intents) => ({
+    actions: intents.map(intent => ({ intent, params: {} })),
+    reply:   '',
+  });
+
+  // "what do I have today / show my day / what's on today / what's my schedule"
+  if (/what.*(do i have|'?s on|s on).*(today|this week)|show.*(my day|today'?s?|schedule)|today.*(schedule|plan|agenda|on)|what'?s? (up|happening) today|what'?s? my (schedule|day|plan)/i.test(m))
+    return acts('get_calendar', 'get_tasks');
+
+  // "show calendar / upcoming events / meetings"
+  if (/show.*(my )?(calendar|events?|meetings?)|upcoming (events?|meetings?)|what.*(meetings?|events?).*(today|this week|tomorrow)|check.*(calendar|schedule)/i.test(m))
+    return acts('get_calendar');
+
+  // "show tasks / open tasks / todo"
+  if (/show.*(my )?(tasks?|todos?|to-dos?)|what.*(tasks?|todos?).*have|open tasks?|list.*tasks?/i.test(m))
+    return acts('get_tasks');
+
+  // "check emails / show inbox / urgent emails"
+  if (/show.*(my )?(emails?|inbox)|check.*(emails?|inbox)|any.*(urgent|unread|new).*(emails?|messages?)|what.*emails?/i.test(m))
+    return acts('get_emails');
+
+  // "show PRs / open pull requests"
+  if (/show.*(my )?(open )?(prs?|pull requests?)|open prs?|any.*(prs?|pull requests?)/i.test(m))
+    return acts('get_prs');
+
+  // "show issues / open issues"
+  if (/show.*(my |open )?(github )?issues?|open issues?|list.*issues?/i.test(m))
+    return acts('get_issues');
+
+  // "run digest / morning digest / daily digest"
+  if (/run.*(digest|briefing)|morning (digest|brief|summary)|daily (digest|brief)/i.test(m))
+    return acts('run_digest');
+
+  // "get digest / show digest / latest digest"
+  if (/(get|show|latest|today'?s?).*(digest|briefing)|what'?s? (the |my )?(digest|briefing)/i.test(m))
+    return acts('get_digest');
+
+  return null;
+}
+
 app.post('/api/chat', requireAuth, async (req, res) => {
   const { message, history = [] } = req.body;
   if (!message?.trim()) return res.status(400).json({ error: 'message required' });
+
+  // ── SSE setup ──────────────────────────────────────────────────────────────
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  function send(obj) {
+    if (!res.writableEnded) res.write(`data: ${JSON.stringify(obj)}\n\n`);
+  }
 
   try {
     const creds = await getUserCreds(req.user.userId);
@@ -803,84 +1006,51 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     const connectedTools = [
       notionReady(creds)                                            && 'Notion (tasks & notes)',
       todoist.isConfigured(creds)                                   && 'Todoist (tasks)',
-      auth.isConnected()                                            && 'Gmail & Google Calendar',
-      (creds.SLACK_BOT_TOKEN  ?? process.env.SLACK_BOT_TOKEN)      && 'Slack',
-      (creds.GITHUB_TOKEN     ?? process.env.GITHUB_TOKEN)         && 'GitHub',
-      (creds.TRELLO_API_KEY   ?? process.env.TRELLO_API_KEY)       && 'Trello',
+      auth.isConnected(req.user.userId)                             && 'Gmail & Google Calendar',
+      creds.SLACK_BOT_TOKEN  && 'Slack',
+      creds.GITHUB_TOKEN     && 'GitHub',
+      creds.TRELLO_API_KEY   && 'Trello',
     ].filter(Boolean).join(', ');
 
     const memContext = memory.buildContextSummary();
-    const classified = await llm.classify(
+
+    // ── Step 1: Classify intent ───────────────────────────────────────────────
+    // Pre-classifier handles common patterns deterministically — no LLM needed.
+    // Falls through to the LLM only when no pattern matches.
+    send({ type: 'status', text: 'Thinking…' });
+
+    const classified = preClassify(message) ?? await llm.classify(
       `Today is ${new Date().toDateString()}. Connected tools: ${connectedTools}.${memContext ? ' User context: ' + memContext : ''}\n${buildRoutingRules()}\nUser message: "${message}"`,
       AGENT_SCHEMA,
       apiKeys
     );
 
-    const actions  = classified.actions ?? [];
-    const isChat   = actions.length === 0 || (actions.length === 1 && actions[0].intent === 'general_chat');
-    const results  = [];
-    const intents  = [];
+    const actions = classified.actions ?? [];
+    const isChat  = actions.length === 0 || (actions.length === 1 && actions[0].intent === 'general_chat');
+    const intents = [];
+    const results = [];
 
+    // ── Step 2: Execute actions ───────────────────────────────────────────────
     if (!isChat) {
+      const statusText = actions.map(a => ACTION_STATUS[a.intent] ?? 'Working…').join(' & ');
+      send({ type: 'status', text: statusText });
+
       const settled = await Promise.allSettled(
-        actions.map(a => executeAction(a.intent, a.params ?? {}, message, creds))
+        actions.map(a => executeAction(a.intent, a.params ?? {}, message, creds, req.user.userId))
       );
       settled.forEach((s, i) => {
         const intent = actions[i].intent;
         const params = actions[i].params ?? {};
-        const result = s.status === 'fulfilled' ? s.value : { error: s.reason?.message };
-        const isErr  = s.status === 'rejected' || result?.error;
+        const result = s.status === 'fulfilled'
+          ? (s.value ?? { error: 'Action returned no result' })
+          : { error: s.reason?.message ?? 'Unknown error' };
+        const isErr = s.status === 'rejected' || result?.error;
         memory.logActivity(intent, params, isErr ? 'error' : 'success', isErr ? (s.reason?.message ?? result?.error) : null);
         intents.push(intent);
         results.push(result);
       });
     }
 
-    // Query intents return data the user wants summarised; action intents just need acknowledgement
-    const needsSummary = intents.some(i => QUERY_INTENTS_SET.has(i));
-
-    let finalReply;
-
-    if (results.length > 0 && needsSummary) {
-      // One focused summary call — only for queries that return data worth explaining
-      const summary = actions.map((a, i) => `${a.intent}: ${JSON.stringify(results[i])}`).join('\n');
-      const hasEmailRange = intents.includes('get_emails_range');
-      const hasIssues     = intents.includes('get_issues');
-      const summaryGuide  = hasEmailRange
-        ? 'List each email as: sender — subject — one-line summary. Group by date if multiple days. End with a total count.'
-        : hasIssues
-        ? 'List each open issue with its number, title, and status. End with a count.'
-        : 'Summarise clearly in 2-4 sentences.';
-      finalReply = await llm.generate(
-        `User asked: "${message}"\nData:\n${summary}\n${summaryGuide}`,
-        '', 'chat', apiKeys
-      );
-    } else if (results.length > 0) {
-      const failedResult = results.find(r => r?.error);
-      if (failedResult) {
-        // Action failed — generate an honest error reply instead of the pre-classified success
-        const summary = actions.map((a, i) => `${a.intent}: ${JSON.stringify(results[i])}`).join('\n');
-        finalReply = await llm.generate(
-          `User asked: "${message}"\nAction results:\n${summary}\nExplain clearly in 1-2 sentences what failed and why.`,
-          '', 'chat', apiKeys
-        );
-      } else {
-        // All actions succeeded — use the pre-classified reply (no extra LLM call)
-        finalReply = classified.reply ?? 'Done.';
-      }
-    } else {
-      const historyMsgs = history.slice(-5).map(m => ({ role: m.role, content: m.content }));
-      finalReply = await llm.call(
-        [
-          { role: 'system', content: `You are DevOS, a personal AI agent managing: ${connectedTools}. Be concise.${memContext ? ' User context: ' + memContext : ''}` },
-          ...historyMsgs,
-          { role: 'user', content: message },
-        ],
-        { taskType: 'chat', maxTokens: 400, apiKeys }
-      );
-    }
-
-    // Tell the client which panel types were affected so they can auto-refresh
     const affectedPanels = [
       intents.some(i => TASK_ACTION_INTENTS.has(i))     && 'tasks',
       intents.some(i => CALENDAR_ACTION_INTENTS.has(i)) && 'calendar',
@@ -889,34 +1059,116 @@ app.post('/api/chat', requireAuth, async (req, res) => {
       intents.some(i => DIGEST_ACTION_INTENTS.has(i))   && 'digest',
     ].filter(Boolean);
 
-    return res.json({
-      reply:          finalReply,
-      intent:         intents[0] ?? 'general_chat',
-      intents,
-      actionResult:   results.length === 1 ? results[0] : results.length > 1 ? results : null,
-      affectedPanels,
-    });
+    const needsSummary  = intents.some(i => QUERY_INTENTS_SET.has(i));
+    const failedResult  = results.find(r => r?.error);
+
+    // ── Step 3: Build + stream reply ──────────────────────────────────────────
+
+    if (results.length > 0 && failedResult) {
+      // Action failed — reply immediately with the error (no second LLM call)
+      const errMsg = failedResult.error ?? 'unknown error';
+      send({ type: 'done', reply: `I ran into an issue: ${errMsg}`, intents, affectedPanels });
+
+    } else if (results.length > 0 && !needsSummary) {
+      // Action succeeded — use the pre-classified reply (no second LLM call)
+      send({ type: 'done', reply: classified.reply ?? 'Done.', intents, affectedPanels });
+
+    } else {
+      // Query (needs summarising) or general chat — stream the response
+      send({ type: 'status', text: needsSummary ? 'Summarizing…' : 'Thinking…' });
+
+      const summaryGuide = intents.includes('get_emails_range')
+        ? 'List each email as: **sender** — subject — one-line summary. Group by date. End with a total count. If the emails array is empty, say "No emails found for that period."'
+        : intents.includes('get_issues')
+        ? 'List each open issue with its number, title, and labels. End with a count. If the issues array is empty, say "No open issues."'
+        : intents.includes('get_prs')
+        ? 'List each PR with number, title, age, and reviewer. End with counts of open vs stale. If empty, say "No open pull requests."'
+        : intents.some(i => i === 'get_calendar' || i === 'get_tasks')
+        ? 'Report ONLY what is in the data provided. For calendar: list each event with its exact time and title. For tasks: list each task with its status. If an array is empty, explicitly say so (e.g. "No upcoming events", "No open tasks"). NEVER invent events, tasks, or names not present in the data.'
+        : 'Summarise clearly in 2-4 sentences using ONLY the data provided. Never invent details.';
+
+      const streamMessages = needsSummary
+        ? [
+            { role: 'system', content: `You are a data reporter. CRITICAL: Only report what exists in the JSON data below. Never invent, assume, or hallucinate any events, tasks, emails, names, or times. If a list is empty, say so clearly. ${summaryGuide}` },
+            { role: 'user',   content: `User asked: "${message}"\nData:\n${actions.map((a, i) => `${a.intent}: ${JSON.stringify(results[i])}`).join('\n')}` },
+          ]
+        : [
+            { role: 'system', content: `You are DevOS, a personal AI agent. Connected tools: ${connectedTools}. Be concise and direct. IMPORTANT: You do NOT have access to the user's real calendar, emails, or tasks in this message — if the user asks what they have today or about specific data, tell them to ask again so the agent can fetch it, rather than guessing or making up any information.${memContext ? ' ' + memContext : ''}` },
+            ...history.slice(-6).map(m => ({ role: m.role, content: m.content })),
+            { role: 'user',   content: message },
+          ];
+
+      let fullReply = '';
+      for await (const token of llm.streamTokens(streamMessages, { taskType: 'chat', maxTokens: 600, apiKeys })) {
+        fullReply += token;
+        send({ type: 'token', text: token });
+      }
+
+      send({ type: 'done', reply: fullReply, intents: intents.length ? intents : ['general_chat'], affectedPanels });
+    }
 
   } catch (err) {
     console.error('[chat]', err);
-    return res.status(500).json({ error: 'Agent error: ' + err.message });
+    send({ type: 'error', text: err.message });
+  } finally {
+    if (!res.writableEnded) res.end();
   }
+});
+
+// ─── LangChain agent endpoint (parallel to /api/chat) ──────────────────────────
+// Same capabilities, but routed through the LangChain createAgent() tool loop.
+// Returns a single JSON reply (non-streaming) so it can be tried side-by-side.
+app.post('/api/chat/agent', requireAuth, async (req, res) => {
+  const { message, history = [] } = req.body;
+  if (!message?.trim()) return res.status(400).json({ error: 'message required' });
+  try {
+    const creds = await getUserCreds(req.user.userId);
+    const connectedTools = [
+      notionReady(creds)                                       && 'Notion (tasks & notes)',
+      todoist.isConfigured(creds)                              && 'Todoist (tasks)',
+      auth.isConnected(req.user.userId)                        && 'Gmail & Google Calendar',
+      creds.SLACK_BOT_TOKEN  && 'Slack',
+      creds.GITHUB_TOKEN     && 'GitHub',
+      creds.TRELLO_API_KEY   && 'Trello',
+    ].filter(Boolean).join(', ');
+
+    const { reply, toolsUsed } = await langchainAgent.runAgent({
+      message, history,
+      creds, userId: req.user.userId,
+      executeAction,
+      connectedTools,
+      memContext: memory.buildContextSummary(),
+    });
+
+    // Log each tool call to activity memory + map to UI panels
+    toolsUsed.forEach(intent => memory.logActivity(intent, {}, 'success', null));
+    const affectedPanels = [
+      toolsUsed.some(i => TASK_ACTION_INTENTS.has(i))     && 'tasks',
+      toolsUsed.some(i => CALENDAR_ACTION_INTENTS.has(i)) && 'calendar',
+      toolsUsed.some(i => GITHUB_ACTION_INTENTS.has(i))   && 'github',
+      toolsUsed.some(i => EMAIL_ACTION_INTENTS.has(i))    && 'comms',
+      toolsUsed.some(i => DIGEST_ACTION_INTENTS.has(i))   && 'digest',
+    ].filter(Boolean);
+
+    res.json({ reply, intents: toolsUsed.length ? toolsUsed : ['general_chat'], affectedPanels });
+  } catch (err) {
+    console.error('[chat/agent]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Clear the agent's rolling summary for this user (called when user hits "Clear")
+app.post('/api/chat/agent/clear', requireAuth, (req, res) => {
+  langchainAgent.clearMemory(req.user.userId);
+  res.json({ ok: true });
 });
 
 // ─── Panel data endpoints ─────────────────────────────────────────────────────
 
-// Returns true if the logged-in user is the one who connected Google OAuth.
-// Falls back to true when no userId was recorded (legacy tokens.json).
-function isGoogleUser(req) {
-  const storedId = auth.getConnectedUserId();
-  if (storedId === null) return true;
-  return storedId === req.user.userId;
-}
-
 // Notion is ready only when both key AND database ID are set
 function notionReady(creds = {}) {
-  const key = creds.NOTION_API_KEY    ?? process.env.NOTION_API_KEY;
-  const db  = creds.NOTION_TASKS_DB_ID ?? process.env.NOTION_TASKS_DB_ID;
+  const key = creds.NOTION_API_KEY;
+  const db  = creds.NOTION_TASKS_DB_ID ?? creds.NOTION_NOTES_DB_ID;
   return !!(key && db && db !== 'your_tasks_database_id_here');
 }
 
@@ -963,22 +1215,34 @@ app.get('/api/notes', requireAuth, async (req, res) => {
     res.json(await notion.getNotes(creds));
   } catch(e){ res.status(500).json({error:e.message}) }
 });
-let _emailCache = null, _emailCacheAt = 0;
+const _emailCache = new Map(); // uid → { data, at }
 const EMAIL_TTL = 5 * 60 * 1000;
 app.get('/api/emails', requireAuth, async (req, res) => {
-  if (!auth.isConnected() || !isGoogleUser(req)) return res.json([]);
-  if (_emailCache && Date.now() - _emailCacheAt < EMAIL_TTL) return res.json(_emailCache);
+  const uid = req.user.userId;
+  if (!auth.isConnected(uid)) return res.json([]);
+  const cached = _emailCache.get(uid);
+  if (cached && Date.now() - cached.at < EMAIL_TTL) return res.json(cached.data);
   try {
-    _emailCache  = await gmail.triageInbox(15);
-    _emailCacheAt = Date.now();
-    res.json(_emailCache);
-  } catch(e) { res.status(500).json({ error: e.message }); }
+    const data = await gmail.triageInbox(uid, 15);
+    _emailCache.set(uid, { data, at: Date.now() });
+    res.json(data);
+  } catch(e) {
+    if (e.code === 'GOOGLE_AUTH_REQUIRED') return res.status(401).json({ error: 'google_auth_required' });
+    res.status(500).json({ error: e.message });
+  }
 });
 app.get('/api/calendar', requireAuth, async (req, res) => {
-  if (!auth.isConnected() || !isGoogleUser(req)) return res.json([]);
-  try { res.json(await calendar.getUpcoming(10)) } catch(e){ res.status(500).json({error:e.message}) }
+  const uid = req.user.userId;
+  if (!auth.isConnected(uid)) return res.json([]);
+  try {
+    res.json(await calendar.getUpcoming(uid, 10));
+  } catch(e) {
+    if (e.code === 'GOOGLE_AUTH_REQUIRED') return res.status(401).json({ error: 'google_auth_required' });
+    res.status(500).json({ error: e.message });
+  }
 });
 app.post('/api/calendar', requireAuth, async (req, res) => {
+  const uid = req.user.userId;
   try {
     const { title, date, duration = 60, description = '', recurring, days, time } = req.body;
     if (!title) return res.status(400).json({ error: 'title is required' });
@@ -986,12 +1250,12 @@ app.post('/api/calendar', requireAuth, async (req, res) => {
     if (recurring) {
       if (!days?.length) return res.status(400).json({ error: 'days array is required for recurring events' });
       if (!time)         return res.status(400).json({ error: 'time (HH:MM) is required for recurring events' });
-      const event = await calendar.createRecurringEvent(title, days, time, Number(duration), description);
+      const event = await calendar.createRecurringEvent(uid, title, days, time, Number(duration), description);
       return res.json(event);
     }
 
     if (!date) return res.status(400).json({ error: 'date is required for single events' });
-    const event = await calendar.createEvent(title, date, Number(duration), description);
+    const event = await calendar.createEvent(uid, title, date, Number(duration), description);
     res.json(event);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -1048,6 +1312,22 @@ app.post('/api/github/draft-body', requireAuth, async (req, res) => {
     res.json({ body });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
+app.get('/api/github/contributions', requireAuth, async (req, res) => {
+  try {
+    const creds = await getUserCreds(req.user.userId);
+    const data  = await github.getContributions(req.query.repo, creds);
+    res.json(data ?? {});
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/github/branches', requireAuth, async (req, res) => {
+  try {
+    const creds = await getUserCreds(req.user.userId);
+    const data  = await github.getBranches(req.query.repo, creds);
+    res.json(data);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 app.post('/api/slack/send', requireAuth, async (req, res) => {
   try {
     const { text } = req.body;
@@ -1071,23 +1351,25 @@ app.get('/api/activity', requireAuth, async (req, res) => {
 
 // ─── Action endpoints ─────────────────────────────────────────────────────────
 
-function invalidateEmailCache() { _emailCache = null; _emailCacheAt = 0; }
+function invalidateEmailCache(uid) { _emailCache.delete(uid); }
 
 app.get('/api/email/:id', requireAuth, async (req, res) => {
-  if (!isGoogleUser(req)) return res.status(403).json({ error: 'Google not connected for this account' });
+  const uid = req.user.userId;
+  if (!auth.isConnected(uid)) return res.status(403).json({ error: 'Google not connected for this account' });
   try {
-    const email = await gmail.getEmail(req.params.id);
+    const email = await gmail.getEmail(uid, req.params.id);
     if (!email) return res.status(404).json({ error: 'not found' });
     res.json(email);
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/api/email/send', requireAuth, async (req, res) => {
+  const uid = req.user.userId;
   try {
     const { to, subject, body } = req.body;
     if (!to || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) return res.status(400).json({ error: 'valid "to" email required' });
     if (!body?.trim()) return res.status(400).json({ error: 'body required' });
-    const result = await gmail.sendEmail(to, subject ?? '(no subject)', body);
+    const result = await gmail.sendEmail(uid, to, subject ?? '(no subject)', body);
     memory.logActivity('send_email', { to, title: subject }, 'success');
     console.log(`[email] sent to=${to} subject="${subject}"`);
     res.json(result);
@@ -1097,13 +1379,14 @@ app.post('/api/email/send', requireAuth, async (req, res) => {
     res.status(500).json({ error: `Failed to send email: ${e.message}` });
   }
 });
-app.post('/api/email/archive', requireAuth, async (req, res) => { try { invalidateEmailCache(); res.json(await gmail.archiveEmail(req.body.id)) } catch(e){ res.status(500).json({error:e.message}) }});
+app.post('/api/email/archive', requireAuth, async (req, res) => { const uid = req.user.userId; try { invalidateEmailCache(uid); res.json(await gmail.archiveEmail(uid, req.body.id)) } catch(e){ res.status(500).json({error:e.message}) }});
 app.post('/api/email/approve-draft', requireAuth, async (req, res) => {
+  const uid = req.user.userId;
   try {
     const { to, subject, original, edited } = req.body;
     if (!to || !edited?.trim()) return res.status(400).json({ error: 'to and edited body are required' });
-    invalidateEmailCache();
-    const sent = await gmail.sendEmail(to, subject, edited);
+    invalidateEmailCache(uid);
+    const sent = await gmail.sendEmail(uid, to, subject, edited);
     memory.recordApprovedDraft(original, edited, 'email');
     memory.logActivity('approve_draft', { to, title: subject }, 'success');
     console.log(`[email] draft approved and sent to=${to} subject="${subject}"`);
@@ -1133,17 +1416,21 @@ app.post('/api/content/approve', requireAuth, async (req, res) => {
   memory.recordApprovedDraft(original, edited, type);
 
   let posted = false;
-  if (postNow && process.env.LINKEDIN_WEBHOOK_URL) {
-    try {
-      const hook = await fetch(process.env.LINKEDIN_WEBHOOK_URL, {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ content: edited, type }),
-      });
-      posted = hook.ok;
-      if (!hook.ok) console.error('[linkedin webhook] status:', hook.status);
-    } catch (err) {
-      console.error('[linkedin webhook]', err.message);
+  if (postNow) {
+    const creds = await getUserCreds(req.user.userId);
+    const webhookUrl = creds.LINKEDIN_WEBHOOK_URL || process.env.LINKEDIN_WEBHOOK_URL;
+    if (webhookUrl) {
+      try {
+        const hook = await fetch(webhookUrl, {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ content: edited, type }),
+        });
+        posted = hook.ok;
+        if (!hook.ok) console.error('[linkedin webhook] status:', hook.status);
+      } catch (err) {
+        console.error('[linkedin webhook]', err.message);
+      }
     }
   }
 
@@ -1183,27 +1470,33 @@ app.post('/api/webhook/github', async (req, res) => {
 
 // ─── Digest orchestrator ──────────────────────────────────────────────────────
 
-async function _runDigest() {
+async function _runDigest(userId = null) {
   console.log('[digest] starting all sub-agents...');
+
+  const creds = userId ? await getUserCreds(userId) : {};
 
   const [commsResult, calendarResult, tasksResult, contentResult] = await Promise.allSettled([
     // Comms sub-agent
-    gmail.triageInbox(15).then(emails => ({
-      pending:  emails.filter(e => e.priority !== 'P3'),
-      archived: emails.filter(e => e.priority === 'P3').length,
-    })),
+    userId && auth.isConnected(userId)
+      ? gmail.triageInbox(userId, 15).then(emails => ({
+          pending:  emails.filter(e => e.priority !== 'P3'),
+          archived: emails.filter(e => e.priority === 'P3').length,
+        }))
+      : Promise.resolve({ pending: [], archived: 0 }),
 
     // Calendar sub-agent
-    Promise.all([
-      calendar.getUpcoming(5),
-      calendar.scanConflicts(),
-    ]).then(([events, conflicts]) => ({ events, conflicts })),
+    userId && auth.isConnected(userId)
+      ? Promise.all([
+          calendar.getUpcoming(userId, 5),
+          calendar.scanConflicts(userId),
+        ]).then(([events, conflicts]) => ({ events, conflicts }))
+      : Promise.resolve({ events: [], conflicts: [] }),
 
     // Tasks sub-agent
     Promise.all([
-      notionReady() ? notion.getTasks() : todoist.getTasks(),
-      github.scanStalePRs(3),
-      trello.scanStaleCards(5),
+      notionReady(creds) ? notion.getTasks(creds) : (todoist.isConfigured(creds) ? todoist.getTasks('today | overdue', creds) : []),
+      github.scanStalePRs(3, undefined, creds),
+      trello.scanStaleCards(5, creds),
     ]).then(([tasks, stalePRs, staleCards]) => ({
       tasks,
       blockers: [
@@ -1213,7 +1506,7 @@ async function _runDigest() {
     })),
 
     // Content sub-agent
-    github.getMergedPRs().then(async prs => {
+    github.getMergedPRs(undefined, undefined, creds).then(async prs => {
       if (!prs.length) return { drafts: [] };
       const changelog = await content.draftChangelog();
       return { drafts: [changelog] };
@@ -1242,11 +1535,11 @@ async function _runDigest() {
 
 // ─── Digest cache — avoids re-running on every page load ─────────────────────
 
-let _cachedDigest = null;
+const _digestCache = new Map(); // uid → digest
 
-export async function runDigest() {
-  const digest = await _runDigest();
-  _cachedDigest = digest;
+export async function runDigest(userId = null) {
+  const digest = await _runDigest(userId);
+  if (userId != null) _digestCache.set(String(userId), digest);
   return digest;
 }
 
@@ -1254,7 +1547,7 @@ export async function runDigest() {
 
 app.post('/api/digest/run', requireAuth, async (req, res) => {
   try {
-    const digest = await runDigest();
+    const digest = await runDigest(req.user.userId);
     res.json(digest);
   } catch (err) {
     console.error('[digest/run]', err);
@@ -1263,31 +1556,35 @@ app.post('/api/digest/run', requireAuth, async (req, res) => {
 });
 
 app.get('/api/digest/latest', requireAuth, (req, res) => {
-  res.json(_cachedDigest ?? null);
+  res.json(_digestCache.get(String(req.user.userId)) ?? null);
 });
 
 // ─── Scheduled digest — every morning at 9 AM ────────────────────────────────
 
 cron.schedule('0 9 * * *', () => {
   console.log('[cron] 9 AM digest firing');
-  runDigest().catch(console.error);
+  for (const userId of auth.getConnectedUserIds()) {
+    runDigest(userId).catch(console.error);
+  }
 });
 
 // Also run 7 AM calendar check
 cron.schedule('0 7 * * *', async () => {
   console.log('[cron] 7 AM calendar check');
-  try {
-    const conflicts = await calendar.scanConflicts();
-    if (conflicts.length) {
-      await slack.sendAlert(
-        `${conflicts.length} calendar conflict(s) today`,
-        conflicts.map(c => `${c.eventA.title} ↔ ${c.eventB.title}`).join('\n'),
-        'high'
-      );
+  for (const userId of auth.getConnectedUserIds()) {
+    try {
+      const conflicts = await calendar.scanConflicts(userId);
+      if (conflicts.length) {
+        await slack.sendAlert(
+          `${conflicts.length} calendar conflict(s) today`,
+          conflicts.map(c => `${c.eventA.title} ↔ ${c.eventB.title}`).join('\n'),
+          'high'
+        );
+      }
+      await calendar.blockFocusTime(userId);
+    } catch (err) {
+      console.error(`[cron/calendar] user ${userId}:`, err.message);
     }
-    await calendar.blockFocusTime();
-  } catch (err) {
-    console.error('[cron/calendar]', err.message);
   }
 });
 
@@ -1342,16 +1639,96 @@ async function migrateEnvCredentials() {
   }
 }
 
+// ─── Migrate integrations.json → Neon on first boot ──────────────────────────
+// Runs once after Neon is connected. Maps old timestamp user IDs to the new
+// serial IDs by matching usernames, then imports every key row.
+async function migrateJsonIntegrations() {
+  const pool = getPool();
+  if (!pool) return;
+
+  const usersFile = new URL('./users.json', import.meta.url);
+  const integFile = new URL('./integrations.json', import.meta.url);
+  if (!fs.existsSync(fileURLToPath(usersFile))) return;
+
+  let oldUsers = [], oldInteg = [];
+  try {
+    oldUsers = JSON.parse(fs.readFileSync(fileURLToPath(usersFile), 'utf8'));
+    if (fs.existsSync(fileURLToPath(integFile)))
+      oldInteg = JSON.parse(fs.readFileSync(fileURLToPath(integFile), 'utf8'));
+  } catch { return; }
+
+  if (!oldUsers.length) return;
+
+  let usersMigrated = 0, keysMigrated = 0;
+
+  for (const oldUser of oldUsers) {
+    // ── 1. Find or create the user in Neon ──────────────────────────────────
+    // Match by username first, then by email (handles Google sign-in users
+    // whose Neon username differs from their local JSON username).
+    let newId = null;
+
+    const byUsername = await pool.query(
+      'SELECT id FROM users WHERE username = $1', [oldUser.username]
+    ).catch(() => null);
+    if (byUsername?.rows[0]) {
+      newId = byUsername.rows[0].id;
+    } else if (oldUser.email) {
+      const byEmail = await pool.query(
+        'SELECT id FROM users WHERE email = $1', [oldUser.email]
+      ).catch(() => null);
+      if (byEmail?.rows[0]) newId = byEmail.rows[0].id;
+    }
+
+    if (!newId) {
+      // Create a new Neon user preserving their password hash so they can log in
+      const ins = await pool.query(
+        `INSERT INTO users (username, email, password_hash, google_id)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (username) DO NOTHING
+         RETURNING id`,
+        [
+          oldUser.username,
+          oldUser.email ?? null,
+          oldUser.passwordHash ?? oldUser.password_hash ?? 'UNKNOWN',
+          oldUser.googleId ?? oldUser.google_id ?? null,
+        ]
+      ).catch(() => null);
+      if (ins?.rows[0]) { newId = ins.rows[0].id; usersMigrated++; }
+    }
+
+    if (!newId) continue;
+
+    // ── 2. Migrate integration keys for this user ───────────────────────────
+    const keys = oldInteg.filter(r => String(r.userId) === String(oldUser.id));
+    for (const k of keys) {
+      try {
+        await pool.query(
+          `INSERT INTO user_integrations (user_id, service, key_name, key_value)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (user_id, service, key_name) DO NOTHING`,
+          [newId, k.service, k.keyName, k.keyValue]
+        );
+        keysMigrated++;
+      } catch { /* skip corrupted rows */ }
+    }
+  }
+
+  if (usersMigrated > 0 || keysMigrated > 0)
+    console.log(`[migration] JSON → Neon: ${usersMigrated} user(s), ${keysMigrated} key(s) imported`);
+}
+
 // ─── Start server ─────────────────────────────────────────────────────────────
 
 await initDB();
+await auth.restoreAllFromDB();
 await migrateEnvCredentials();
+await migrateJsonIntegrations();
 app.listen(PORT, () => {
   console.log(`\n🚀 DevOS Agent server running on http://localhost:${PORT}`);
   console.log(`   Gemini: ${process.env.GEMINI_API_KEY ? '✓' : '✗ missing'}`);
   console.log(`   Groq:   ${process.env.GROQ_API_KEY   ? '✓' : '✗ missing'}`);
   console.log(`   Notion: ${process.env.NOTION_API_KEY  ? '✓' : '✗ missing'}`);
-  console.log(`   Google: ${auth.isConnected()           ? '✓ connected' : '✗ not connected — visit /api/auth/google'}`);
+  console.log(`   Google: ${auth.getConnectedUserIds().length} user(s) connected`);
   console.log(`   Slack:   ${process.env.SLACK_BOT_TOKEN  ? '✓' : '○ optional'}`);
   console.log(`   GitHub:  ${process.env.GITHUB_TOKEN     ? '✓' : '○ optional'}`);
   console.log(`   Trello:  ${process.env.TRELLO_API_KEY   ? '✓' : '○ optional'}`);
