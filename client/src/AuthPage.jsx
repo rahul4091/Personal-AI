@@ -8,9 +8,13 @@ export default function AuthPage({ onAuth }) {
   const [loading,  setLoading]  = useState(false);
   const [showPwd,  setShowPwd]  = useState(false);
   const params = new URLSearchParams(window.location.search);
-  const [error, setError] = useState(
-    params.get('auth_error') === 'google_failed' ? 'Google sign-in failed. Please try again.' : ''
-  );
+  const [error, setError] = useState(() => {
+    if (params.get('auth_error') === 'google_failed') {
+      const detail = params.get('detail');
+      return detail ? `Google sign-in failed: ${detail}` : 'Google sign-in failed. Please try again.';
+    }
+    return '';
+  });
 
   function switchMode(next) {
     setMode(next);

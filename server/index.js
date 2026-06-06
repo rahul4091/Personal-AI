@@ -162,7 +162,8 @@ app.get('/api/auth/google/callback', async (req, res) => {
     res.redirect(`${frontendURL}${fromSettings ? '/settings?google_connected=true' : '/?connected=true'}`);
   } catch (err) {
     console.error('[auth/google/callback] FULL ERROR:', err);
-    res.redirect(`${frontendURL}/?auth_error=google_failed`);
+    const msg = encodeURIComponent(err.message ?? 'Unknown error');
+    res.redirect(`${frontendURL}/?auth_error=google_failed&detail=${msg}`);
   }
 });
 
