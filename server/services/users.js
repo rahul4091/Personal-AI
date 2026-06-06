@@ -19,7 +19,14 @@ export async function createUser(username, password, email) {
   if (password.length < 8)                 throw new Error('Password must be at least 8 characters');
 
   const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
-  return dbCreateUser({ username: username.trim(), email: email?.trim() || null, passwordHash });
+  try {
+    return await dbCreateUser({ username: username.trim(), email: email?.trim() || null, passwordHash });
+  } catch (err) {
+    if (err.code === '23505' || err.message?.includes('unique') || err.message?.includes('already taken')) {
+      throw new Error('Username already taken — please choose another');
+    }
+    throw err;
+  }
 }
 
 export async function loginUser(username, password) {
