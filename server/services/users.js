@@ -37,7 +37,7 @@ export async function loginUser(username, password) {
 }
 
 export function signToken(user) {
-  return jwt.sign({ userId: user.id, username: user.username }, JWT_SECRET, { expiresIn: '30d' });
+  return jwt.sign({ userId: user.id, username: user.username }, JWT_SECRET, { expiresIn: '90d' });
 }
 
 export function verifyToken(token) {
