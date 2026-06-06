@@ -14,8 +14,9 @@ import NavBar          from './components/NavBar.jsx';
 import AuthPage        from './AuthPage.jsx';
 import OnboardingWizard from './OnboardingWizard.jsx';
 import SettingsPage     from './SettingsPage.jsx';
+import AdminPage        from './AdminPage.jsx';
 
-const navItems = [
+const BASE_NAV = [
   { id: 'digest',   label: "Today's digest", dot: '#888780' },
   { id: 'comms',    label: 'Comms',          dot: '#1D9E75' },
   { id: 'calendar', label: 'Calendar',       dot: '#7F77DD' },
@@ -26,9 +27,11 @@ const navItems = [
   { id: 'chat',     label: 'Chat',           dot: '#378ADD' },
   { id: 'settings', label: 'Settings',       dot: null },
 ];
+const ADMIN_NAV = { id: 'admin', label: 'Admin', dot: '#c0392b' };
 
 export default function App() {
-  const VALID_VIEWS = new Set(navItems.map(n => n.id));
+  const [navItems, setNavItems] = useState(BASE_NAV);
+  const VALID_VIEWS = new Set([...BASE_NAV.map(n => n.id), 'admin']);
   const [view, setView] = useState(() => {
     const saved = localStorage.getItem('devos_view');
     return saved && VALID_VIEWS.has(saved) ? saved : 'digest';
@@ -47,8 +50,14 @@ export default function App() {
 
   const isLoggedIn = !!user;
 
+  function applyUser(u) {
+    setUser(u);
+    if (u?.isAdmin) setNavItems([...BASE_NAV, ADMIN_NAV]);
+    else setNavItems(BASE_NAV);
+  }
+
   function handleAuth(newUser, isSignup) {
-    setUser(newUser);
+    applyUser(newUser);
     if (isSignup) {
       localStorage.setItem('devos_onboarding', 'true');
       setShowOnboarding(true);
@@ -155,7 +164,7 @@ export default function App() {
         })
         .then(u => {
           if (u) {
-            setUser(u);
+            applyUser(u);
             if (localStorage.getItem('devos_onboarding') === 'true') setShowOnboarding(true);
           }
           setAuthChecked(true);
@@ -172,7 +181,7 @@ export default function App() {
       window.history.replaceState({}, '', '/');
       fetch('/api/users/me', { headers: { Authorization: `Bearer ${googleToken}` } })
         .then(r => r.ok ? r.json() : null)
-        .then(u => { if (u) { setUser(u); setAuthChecked(true); } })
+        .then(u => { if (u) { applyUser(u); setAuthChecked(true); } })
         .catch(() => {});
       fetchHealth();
       return;
@@ -225,6 +234,7 @@ export default function App() {
         <div style={{ display: view === 'slack'    ? 'block' : 'none' }}><SlackPanel health={health} onGoToSettings={() => handleViewChange('settings')} /></div>
         <div style={{ display: view === 'chat'     ? 'block' : 'none', height: '100%' }}><ChatPanel onAction={handleChatAction} health={health} connected={connected} /></div>
         {view === 'settings' && <SettingsPage user={user} onLogout={handleLogout} health={health} />}
+        {view === 'admin'    && <AdminPage user={user} />}
       </main>
     </div>
   );

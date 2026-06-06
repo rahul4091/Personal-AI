@@ -19,7 +19,7 @@ import trello     from './services/trello.js';
 import content    from './services/content.js';
 import todoist    from './services/todoist.js';
 import auth       from './services/auth.js';
-import { initDB, getPool } from './services/db.js';
+import { initDB, getPool, dbListUsers, dbSetAdmin, dbIsAdmin, dbDeleteUser } from './services/db.js';
 import * as userService from './services/users.js';
 import * as integrations from './services/integrations.js';
 import langchainAgent from './services/langchain-agent.js';
@@ -217,7 +217,8 @@ app.get('/api/users/me', async (req, res) => {
     const payload = userService.verifyToken(auth_header.slice(7));
     const user    = await userService.getUserById(payload.userId);
     if (!user) return res.status(404).json({ error: 'User not found' });
-    res.json({ id: user.id, username: user.username, email: user.email });
+    const isAdmin = await dbIsAdmin(payload.userId);
+    res.json({ id: user.id, username: user.username, email: user.email, isAdmin });
   } catch {
     res.status(401).json({ error: 'Invalid or expired token' });
   }
@@ -236,6 +237,20 @@ function requireAuth(req, res, next) {
   } catch {
     return res.status(401).json({ error: 'Invalid or expired token' });
   }
+}
+
+async function requireAdmin(req, res, next) {
+  const header = req.headers.authorization;
+  if (!header?.startsWith('Bearer ')) return res.status(401).json({ error: 'Not authenticated' });
+  try {
+    const payload = userService.verifyToken(header.slice(7));
+    req.user = { userId: payload.userId, username: payload.username };
+  } catch {
+    return res.status(401).json({ error: 'Invalid or expired token' });
+  }
+  const admin = await dbIsAdmin(req.user.userId);
+  if (!admin) return res.status(403).json({ error: 'Admin access required' });
+  next();
 }
 
 // ─── Integration key routes ────────────────────────────────────────────────────
@@ -570,6 +585,67 @@ app.delete('/api/users/me', requireAuth, async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     res.status(400).json({ error: err.message });
+  }
+});
+
+// ─── Admin routes ─────────────────────────────────────────────────────────────
+
+app.get('/api/admin/users', requireAdmin, async (req, res) => {
+  try {
+    const users = await dbListUsers();
+    // Attach integration counts per user
+    const withCounts = await Promise.all(users.map(async u => {
+      try {
+        const keys = await integrations.listKeysWithMeta(u.id);
+        return { ...u, integrationCount: keys.length };
+      } catch {
+        return { ...u, integrationCount: 0 };
+      }
+    }));
+    res.json(withCounts);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/admin/users/:id', requireAdmin, async (req, res) => {
+  const targetId = Number(req.params.id);
+  if (targetId === req.user.userId) return res.status(400).json({ error: 'Cannot delete your own account here' });
+  try {
+    await dbDeleteUser(targetId);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.patch('/api/admin/users/:id/admin', requireAdmin, async (req, res) => {
+  try {
+    await dbSetAdmin(Number(req.params.id), !!req.body.isAdmin);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/admin/stats', requireAdmin, async (req, res) => {
+  try {
+    const users = await dbListUsers();
+    const pool = getPool();
+    let integrationRows = 0;
+    if (pool) {
+      const r = await pool.query('SELECT COUNT(*) FROM user_integrations');
+      integrationRows = Number(r.rows[0].count);
+    }
+    res.json({
+      userCount: users.length,
+      adminCount: users.filter(u => u.isAdmin).length,
+      integrationRows,
+      uptime: Math.floor(process.uptime()),
+      nodeVersion: process.version,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 

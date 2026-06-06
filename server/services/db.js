@@ -50,6 +50,7 @@ export async function initDB() {
     `);
     await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active  BOOLEAN DEFAULT TRUE`);
     await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS google_id  TEXT UNIQUE`);
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin   BOOLEAN DEFAULT FALSE`);
 
     // ── User integrations table ───────────────────────────────────────────────
     // Stores one encrypted key/value per row, keyed by (user_id, service, key_name).
@@ -216,4 +217,38 @@ export async function dbCreateGoogleUser({ username, email, googleId }) {
   };
   saveUsers([...users, user]);
   return { id: user.id, username: user.username, email: user.email, isActive: user.isActive, createdAt: user.createdAt };
+}
+
+// ─── Admin helpers ────────────────────────────────────────────────────────────
+
+export async function dbListUsers() {
+  if (pool) {
+    const r = await pool.query(
+      `SELECT id, username, email, is_active AS "isActive", is_admin AS "isAdmin", created_at AS "createdAt" FROM users ORDER BY id`
+    );
+    return r.rows;
+  }
+  return readUsers().map(u => ({
+    id: u.id, username: u.username, email: u.email ?? null,
+    isActive: u.isActive ?? true, isAdmin: u.isAdmin ?? false, createdAt: u.createdAt,
+  }));
+}
+
+export async function dbSetAdmin(userId, isAdmin) {
+  if (pool) {
+    await pool.query('UPDATE users SET is_admin = $1 WHERE id = $2', [isAdmin, userId]);
+    return;
+  }
+  const users = readUsers();
+  const idx = users.findIndex(u => String(u.id) === String(userId));
+  if (idx >= 0) { users[idx].isAdmin = isAdmin; saveUsers(users); }
+}
+
+export async function dbIsAdmin(userId) {
+  if (pool) {
+    const r = await pool.query('SELECT is_admin FROM users WHERE id = $1', [userId]);
+    return r.rows[0]?.is_admin ?? false;
+  }
+  const u = readUsers().find(u => String(u.id) === String(userId));
+  return u?.isAdmin ?? false;
 }
