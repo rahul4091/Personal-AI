@@ -9,8 +9,7 @@ import DigestPanel     from './components/DigestPanel.jsx';
 import LinkedInPanel   from './components/LinkedInPanel.jsx';
 import GitHubPanel     from './components/GitHubPanel.jsx';
 import SlackPanel      from './components/SlackPanel.jsx';
-import TopBar          from './components/TopBar.jsx';
-import NavBar          from './components/NavBar.jsx';
+import Sidebar         from './components/Sidebar.jsx';
 import AuthPage        from './AuthPage.jsx';
 import OnboardingWizard from './OnboardingWizard.jsx';
 import SettingsPage     from './SettingsPage.jsx';
@@ -211,30 +210,50 @@ export default function App() {
   if (!user) return <AuthPage onAuth={handleAuth} />;
   if (showOnboarding) return <OnboardingWizard user={user} onComplete={handleOnboardingComplete} />;
 
+  const isTasksView = view === 'tasks';
+  const isChatView  = view === 'chat';
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden' }}>
+    <div style={{ display: 'flex', height: '100vh', overflow: 'hidden', background: 'var(--bg)' }}>
       <ToastContainer />
-      <TopBar
-        connected={connected}
-        health={health}
+
+      <Sidebar
+        view={view}
+        setView={handleViewChange}
+        navItems={navItems}
         user={user}
-        isLoggedIn={isLoggedIn}
+        health={health}
+        connected={connected}
         onLogout={handleLogout}
         onConnectGoogle={handleConnectGoogle}
       />
-      <NavBar view={view} setView={handleViewChange} navItems={navItems} />
 
-      <main style={{ flex: 1, overflow: view === 'tasks' ? 'hidden' : 'auto', padding: view === 'tasks' ? '20px 24px' : '28px 40px', display: 'flex', flexDirection: 'column' }}>
-        <div style={{ display: view === 'digest'   ? 'block' : 'none' }}><DigestPanel health={health} connected={connected} refreshKey={digestRefreshKey} onGoToSettings={() => handleViewChange('settings')} /></div>
-        <div style={{ display: view === 'comms'    ? 'block' : 'none' }}><EmailPanel connected={connected} refreshKey={emailRefreshKey} onConnectGoogle={handleConnectGoogle} onGoToSettings={() => handleViewChange('settings')} /></div>
-        <div style={{ display: view === 'calendar' ? 'block' : 'none' }}><CalendarPanel connected={connected} refreshKey={calendarRefreshKey} onConnectGoogle={handleConnectGoogle} onGoToSettings={() => handleViewChange('settings')} /></div>
-        <div style={{ display: view === 'tasks' ? 'flex' : 'none', flexDirection: 'column', height: '100%' }}><TaskPanel refreshKey={taskRefreshKey} onGoToSettings={() => handleViewChange('settings')} /></div>
-        <div style={{ display: view === 'github'   ? 'block' : 'none' }}><GitHubPanel health={health} refreshKey={githubRefreshKey} onGoToSettings={() => handleViewChange('settings')} /></div>
-        <div style={{ display: view === 'linkedin' ? 'block' : 'none' }}><LinkedInPanel health={health} /></div>
-        <div style={{ display: view === 'slack'    ? 'block' : 'none' }}><SlackPanel health={health} onGoToSettings={() => handleViewChange('settings')} /></div>
-        <div style={{ display: view === 'chat'     ? 'block' : 'none', height: '100%' }}><ChatPanel onAction={handleChatAction} health={health} connected={connected} /></div>
-        {view === 'settings' && <SettingsPage user={user} onLogout={handleLogout} health={health} />}
-        {view === 'admin'    && <AdminPage user={user} />}
+      <main style={{
+        flex: 1,
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
+        background: 'var(--surface)',
+        borderLeft: '1px solid var(--border)',
+      }}>
+        <div style={{
+          flex: 1,
+          overflow: isTasksView ? 'hidden' : 'auto',
+          padding: isTasksView ? '24px 28px' : isChatView ? '0' : '32px 36px',
+          display: 'flex',
+          flexDirection: 'column',
+        }}>
+          <div style={{ display: view === 'digest'   ? 'block' : 'none' }}><DigestPanel health={health} connected={connected} refreshKey={digestRefreshKey} onGoToSettings={() => handleViewChange('settings')} /></div>
+          <div style={{ display: view === 'comms'    ? 'block' : 'none' }}><EmailPanel connected={connected} refreshKey={emailRefreshKey} onConnectGoogle={handleConnectGoogle} onGoToSettings={() => handleViewChange('settings')} /></div>
+          <div style={{ display: view === 'calendar' ? 'block' : 'none' }}><CalendarPanel connected={connected} refreshKey={calendarRefreshKey} onConnectGoogle={handleConnectGoogle} onGoToSettings={() => handleViewChange('settings')} /></div>
+          <div style={{ display: isTasksView ? 'flex' : 'none', flexDirection: 'column', height: '100%' }}><TaskPanel refreshKey={taskRefreshKey} onGoToSettings={() => handleViewChange('settings')} /></div>
+          <div style={{ display: view === 'github'   ? 'block' : 'none' }}><GitHubPanel health={health} refreshKey={githubRefreshKey} onGoToSettings={() => handleViewChange('settings')} /></div>
+          <div style={{ display: view === 'linkedin' ? 'block' : 'none' }}><LinkedInPanel health={health} /></div>
+          <div style={{ display: view === 'slack'    ? 'block' : 'none' }}><SlackPanel health={health} onGoToSettings={() => handleViewChange('settings')} /></div>
+          <div style={{ display: isChatView ? 'flex' : 'none', flex: 1, flexDirection: 'column', height: '100%' }}><ChatPanel onAction={handleChatAction} health={health} connected={connected} /></div>
+          {view === 'settings' && <SettingsPage user={user} onLogout={handleLogout} health={health} />}
+          {view === 'admin'    && <AdminPage user={user} />}
+        </div>
       </main>
     </div>
   );

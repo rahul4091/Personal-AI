@@ -1,34 +1,55 @@
 /* ============================================================
-   DevOS Agent — client/src/index.css
-   Upgraded design tokens. Zero breaking changes — everything
-   below the original block is additive. Drop this in as-is.
+   DevOS — design system
    ============================================================ */
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-  /* ---- Surfaces & text ---- */
-  --bg:       #f9f9f8;
-  --surface:  #ffffff;
-  --border:   #d8d7d3;
-  --text:     #1a1a18;
-  --muted:    #6b6b68;
-  --hint:     #a0a09d;
+  /* ---- Core surfaces ---- */
+  --bg:       #F7F7F5;
+  --surface:  #FFFFFF;
+  --border:   #E5E4E0;
+
+  /* ---- Text ---- */
+  --text:     #18181A;
+  --muted:    #6E6D6A;
+  --hint:     #A8A7A3;
 
   /* ---- Semantic ---- */
   --accent:   #1D9E75;
+  --accent-hover: #189366;
   --danger:   #D85A30;
   --warning:  #BA7517;
   --info:     #378ADD;
-  --success:  #639922;
+  --success:  #22c55e;
+
+  /* ---- Sidebar ---- */
+  --sidebar-bg:          #F2F1EE;
+  --sidebar-border:      #E5E4E0;
+  --sidebar-active-bg:   rgba(0,0,0,0.07);
+  --sidebar-hover-bg:    rgba(0,0,0,0.04);
+  --sidebar-item-color:  #6E6D6A;
+  --sidebar-avatar-bg:   #E5E4E0;
 
   /* ---- Radii ---- */
   --radius:    8px;
   --radius-lg: 12px;
-  --radius-sm: 4px;
+  --radius-sm: 5px;
   --radius-pill: 999px;
 
-  /* ---- Sidebar / panel dots (per surface) ---- */
+  /* ---- Shadows ---- */
+  --shadow-0: none;
+  --shadow-1: 0 1px 2px rgba(20,20,18,0.05), 0 0 0 1px rgba(20,20,18,0.04);
+  --shadow-2: 0 4px 12px rgba(20,20,18,0.08), 0 0 0 1px rgba(20,20,18,0.04);
+
+  /* ---- Tag colors ---- */
+  --tag-danger-bg:  #FAECE7;  --tag-danger-fg:  #712B13;
+  --tag-warn-bg:    #FAEEDA;  --tag-warn-fg:    #633806;
+  --tag-success-bg: #EAF3DE;  --tag-success-fg: #27500A;
+  --tag-info-bg:    #E6F1FB;  --tag-info-fg:    #0C447C;
+  --tag-gray-bg:    #F1EFE8;  --tag-gray-fg:    #444441;
+
+  /* ---- Sidebar dots ---- */
   --dot-digest:   #888780;
   --dot-comms:    #1D9E75;
   --dot-calendar: #7F77DD;
@@ -37,41 +58,10 @@
   --dot-linkedin: #0A66C2;
   --dot-slack:    #611f69;
   --dot-chat:     #378ADD;
-  --dot-study:    #8B5CF6;
-
-  /* ---- Tag color pairs (bg / fg) — already encoded below in .tag-* ---- */
-  --tag-danger-bg:  #FAECE7;  --tag-danger-fg:  #712B13;
-  --tag-warn-bg:    #FAEEDA;  --tag-warn-fg:    #633806;
-  --tag-success-bg: #EAF3DE;  --tag-success-fg: #27500A;
-  --tag-info-bg:    #E6F1FB;  --tag-info-fg:    #0C447C;
-  --tag-gray-bg:    #F1EFE8;  --tag-gray-fg:    #444441;
-
-  /* ---- Spacing scale (px) ---- */
-  --space-1: 2px;
-  --space-2: 4px;
-  --space-3: 6px;
-  --space-4: 8px;
-  --space-5: 10px;
-  --space-6: 12px;
-  --space-7: 14px;
-  --space-8: 16px;
-  --space-10: 20px;
-
-  /* ---- Borders ----
-     Every surface uses HAIRLINE 0.5px. The 3px accent bar is
-     the only "thicker" border in the system. */
-  --border-hairline: 1px solid var(--border);
-
-  /* ---- Elevation — used sparingly. Cards use border, not shadow. ---- */
-  --shadow-none: none;
-  --shadow-1: 0 1px 2px rgba(20,20,20,0.04);
-  --shadow-2: 0 2px 8px rgba(20,20,20,0.06);
 
   /* ---- Type ---- */
-  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-               "Helvetica Neue", Arial, sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas,
-               "Liberation Mono", monospace;
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 
   --fs-xs:   10px;
   --fs-sm:   11px;
@@ -88,16 +78,23 @@
 
   --tracking-eyebrow: 0.05em;
 
-  /* ---- Timing ---- */
-  --t-fast:   0.12s;
-  --t-normal: 0.2s;
+  /* ---- Motion ---- */
+  --t-fast:   0.1s;
+  --t-normal: 0.18s;
+  --ease:     cubic-bezier(.4,0,.2,1);
+
+  /* ---- Layout ---- */
+  --border-hairline: 1px solid var(--border);
+  --space-1: 2px; --space-2: 4px; --space-3: 6px; --space-4: 8px;
+  --space-5: 10px; --space-6: 12px; --space-7: 14px; --space-8: 16px;
+  --space-10: 20px;
 }
 
+/* ============================================================
+   Base
+   ============================================================ */
 html, body, #root {
   height: 100%;
-}
-
-body {
   font-family: var(--font-sans);
   background: var(--bg);
   color: var(--text);
@@ -105,13 +102,21 @@ body {
   line-height: var(--lh-normal);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  font-feature-settings: "cv02","cv03","cv04","cv11";
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.01em;
 }
 
 /* ============================================================
-   Buttons — unchanged behaviour, now token-driven
+   Scrollbar
+   ============================================================ */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; }
+::-webkit-scrollbar-thumb:hover { background: var(--hint); }
+
+/* ============================================================
+   Buttons
    ============================================================ */
 button {
   cursor: pointer;
@@ -121,43 +126,60 @@ button {
   border-radius: var(--radius);
   padding: 6px 12px;
   font-size: var(--fs-md);
-  transition: background var(--t-fast), color var(--t-fast);
+  font-family: var(--font-sans);
+  transition: background var(--t-fast) var(--ease), opacity var(--t-fast);
+  line-height: 1;
 }
-button:hover { background: rgba(0,0,0,0.06); }
+button:hover:not(:disabled) { background: rgba(0,0,0,0.06); }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+
 button.primary {
   background: var(--accent);
   color: #fff;
+  font-weight: 500;
 }
-button.primary:hover { opacity: .88; background: var(--accent); }
+button.primary:hover:not(:disabled) { background: var(--accent-hover); }
+
 button.danger {
   background: var(--danger);
   color: #fff;
+  font-weight: 500;
 }
-button.danger:hover { opacity: .88; background: var(--danger); }
+button.danger:hover:not(:disabled) { opacity: .88; }
 
 /* ============================================================
    Inputs
    ============================================================ */
-input, textarea {
+input, textarea, select {
   border: var(--border-hairline);
   border-radius: var(--radius);
-  padding: 8px 12px;
+  padding: 7px 11px;
   font-size: var(--fs-base);
+  font-family: var(--font-sans);
   width: 100%;
   background: var(--surface);
   color: var(--text);
+  transition: border-color var(--t-fast);
+  outline: none;
 }
-input:focus, textarea:focus { outline: none; border-color: var(--accent); }
+input:focus, textarea:focus, select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2.5px rgba(29,158,117,.12);
+}
+textarea { resize: vertical; line-height: var(--lh-loose); }
+input::placeholder, textarea::placeholder { color: var(--hint); }
 
 /* ============================================================
    Tags
    ============================================================ */
 .tag {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
   font-size: var(--fs-xs);
   font-weight: 500;
   padding: 2px 7px;
   border-radius: var(--radius-sm);
+  line-height: 1.4;
 }
 .tag-danger  { background: var(--tag-danger-bg);  color: var(--tag-danger-fg); }
 .tag-warn    { background: var(--tag-warn-bg);    color: var(--tag-warn-fg); }
@@ -166,41 +188,7 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent); }
 .tag-gray    { background: var(--tag-gray-bg);    color: var(--tag-gray-fg); }
 
 /* ============================================================
-   Semantic type helpers — opt-in, never required
-   Use these instead of inline font-size/weight in JSX where possible.
-   ============================================================ */
-.t-h1 {
-  font-size: var(--fs-h1);
-  font-weight: 400;
-  color: var(--text);
-  line-height: var(--lh-tight);
-}
-.t-h2 {
-  font-size: var(--fs-h2);
-  font-weight: 500;
-  color: var(--text);
-}
-.t-stat {
-  font-size: var(--fs-stat);
-  font-weight: 500;
-  line-height: 1;
-}
-.t-body         { font-size: var(--fs-base); line-height: var(--lh-normal); color: var(--text); }
-.t-body-strong  { font-size: var(--fs-base); font-weight: 500; color: var(--text); }
-.t-meta         { font-size: var(--fs-sm); color: var(--muted); }
-.t-hint         { font-size: var(--fs-sm); color: var(--hint); }
-.t-eyebrow {
-  font-size: var(--fs-sm);
-  font-weight: 500;
-  color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: var(--tracking-eyebrow);
-}
-.t-code { font-family: var(--font-mono); font-size: var(--fs-md); }
-
-/* ============================================================
-   Card primitive — opt-in.
-   Use as <div class="ds-card"> or <div class="ds-card ds-card--p1">
+   Card primitive
    ============================================================ */
 .ds-card {
   background: var(--surface);
@@ -208,22 +196,55 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent); }
   border-radius: var(--radius);
   padding: 10px 14px;
 }
-.ds-card--accent  { border-left: 3px solid var(--accent);  border-radius: 0 var(--radius) var(--radius) 0; }
-.ds-card--p1      { border-left: 3px solid var(--danger);  border-radius: 0 var(--radius) var(--radius) 0; }
-.ds-card--p2      { border-left: 3px solid var(--warning); border-radius: 0 var(--radius) var(--radius) 0; }
-.ds-card--focus   { border-left: 3px solid var(--info);    border-radius: 0 var(--radius) var(--radius) 0; }
+.ds-card--accent  { border-left: 2.5px solid var(--accent);  border-radius: 0 var(--radius) var(--radius) 0; }
+.ds-card--danger  { border-left: 2.5px solid var(--danger);  border-radius: 0 var(--radius) var(--radius) 0; }
+.ds-card--warning { border-left: 2.5px solid var(--warning); border-radius: 0 var(--radius) var(--radius) 0; }
+.ds-card--info    { border-left: 2.5px solid var(--info);    border-radius: 0 var(--radius) var(--radius) 0; }
 
 /* ============================================================
-   Status dot (7×7 by default)
+   Type helpers
    ============================================================ */
-.ds-dot {
-  display: inline-block;
-  width: 7px; height: 7px;
-  border-radius: 50%;
-  background: var(--hint);
-  flex-shrink: 0;
+.t-h1     { font-size: var(--fs-h1); font-weight: 600; color: var(--text); line-height: var(--lh-tight); letter-spacing: -0.02em; }
+.t-h2     { font-size: var(--fs-h2); font-weight: 500; color: var(--text); }
+.t-stat   { font-size: var(--fs-stat); font-weight: 500; line-height: 1; }
+.t-body   { font-size: var(--fs-base); line-height: var(--lh-normal); color: var(--text); }
+.t-body-strong { font-size: var(--fs-base); font-weight: 500; color: var(--text); }
+.t-meta   { font-size: var(--fs-sm); color: var(--muted); }
+.t-hint   { font-size: var(--fs-sm); color: var(--hint); }
+.t-eyebrow {
+  font-size: var(--fs-sm); font-weight: 500; color: var(--muted);
+  text-transform: uppercase; letter-spacing: var(--tracking-eyebrow);
 }
+.t-code { font-family: var(--font-mono); font-size: var(--fs-md); }
+
+/* ============================================================
+   Status dot
+   ============================================================ */
+.ds-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--hint); flex-shrink: 0; }
 .ds-dot--success { background: var(--success); }
 .ds-dot--danger  { background: var(--danger); }
 .ds-dot--warning { background: var(--warning); }
 .ds-dot--info    { background: var(--info); }
+
+/* ============================================================
+   Content area page header
+   ============================================================ */
+.page-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 24px;
+  gap: 16px;
+}
+.page-header__title {
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: -0.02em;
+  line-height: 1.25;
+}
+.page-header__sub {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 3px;
+}
