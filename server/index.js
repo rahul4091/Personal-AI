@@ -1574,6 +1574,14 @@ app.post('/api/task/update', requireAuth, async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 app.post('/api/memory/vip', requireAuth, async (req, res) => { res.json({ vips: memory.addVIP(req.body.email, req.body.name) }) });
+app.get('/api/content/linkedin/history', requireAuth, (req, res) => {
+  const { voiceProfile } = memory.getMemory();
+  const posts = voiceProfile.approvedDrafts
+    .filter(d => d.type === 'linkedin')
+    .slice(-20)
+    .reverse();
+  res.json(posts);
+});
 app.post('/api/content/linkedin', requireAuth, async (req, res) => { try { res.json(await content.draftLinkedInPost(req.body.source)) } catch(e){ res.status(500).json({error:e.message}) }});
 app.post('/api/content/approve', requireAuth, async (req, res) => {
   const { original, edited, type = 'linkedin', postNow = false } = req.body;

@@ -23,11 +23,12 @@ Raw input: "${source}"
 Return JSON:
 {
   "variants": [
-    { "label": "storytelling", "wordCount": 150, "body": "full post text" },
-    { "label": "concise",      "wordCount": 80,  "body": "full post text" },
-    { "label": "technical",    "wordCount": 220, "body": "full post text" }
+    { "label": "storytelling", "wordCount": 150, "body": "full post text using newlines for readability" },
+    { "label": "concise",      "wordCount": 80,  "body": "full post text using newlines for readability" },
+    { "label": "thought leader","wordCount": 220, "body": "full post text using newlines for readability" }
   ],
-  "recommendedVariant": 0
+  "recommendedVariant": 0,
+  "hashtags": ["#Hashtag1", "#Hashtag2", "#Hashtag3", "#Hashtag4", "#Hashtag5"]
 }`;
 
   const result = await llm.call(
