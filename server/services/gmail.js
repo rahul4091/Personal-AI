@@ -3,15 +3,16 @@ import { google } from 'googleapis';
 import { getAuthClient } from './auth.js';
 import llm from './llm.js';
 
-function gmail() {
-  return google.gmail({ version: 'v1', auth: getAuthClient() });
+async function gmail(userId) {
+  return google.gmail({ version: 'v1', auth: await getAuthClient(userId) });
 }
 
 // ─── Read inbox ───────────────────────────────────────────────────────────────
 
-export async function getInbox(maxResults = 10) {
+export async function getInbox(userId, maxResults = 10) {
   try {
-    const res = await gmail().users.messages.list({
+    const g   = await gmail(userId);
+    const res = await g.users.messages.list({
       userId: 'me',
       maxResults,
       q: 'is:unread in:inbox',
@@ -19,18 +20,24 @@ export async function getInbox(maxResults = 10) {
 
     const messages = res.data.messages ?? [];
     const emails   = await Promise.all(
-      messages.map(m => getEmail(m.id))
+      messages.map(m => getEmail(userId, m.id))
     );
     return emails.filter(Boolean);
   } catch (err) {
+    if (err.code === 401 || err.message?.includes('invalid_grant') || err.message?.includes('Token has been expired')) {
+      const authErr = new Error('Google authentication required');
+      authErr.code = 'GOOGLE_AUTH_REQUIRED';
+      throw authErr;
+    }
     console.error('[gmail] getInbox:', err.message);
     return [];
   }
 }
 
-export async function getEmail(messageId) {
+export async function getEmail(userId, messageId) {
   try {
-    const res     = await gmail().users.messages.get({ userId: 'me', id: messageId, format: 'full' });
+    const g   = await gmail(userId);
+    const res = await g.users.messages.get({ userId: 'me', id: messageId, format: 'full' });
     const headers = res.data.payload?.headers ?? [];
     const get     = name => headers.find(h => h.name.toLowerCase() === name.toLowerCase())?.value ?? '';
 
@@ -114,8 +121,9 @@ function stripHtml(html) {
 
 // ─── Triage — batch all emails in ONE LLM call ───────────────────────────────
 
-export async function triageInbox(maxResults = 15) {
-  const emails = await getInbox(maxResults);
+export async function triageInbox(userId, maxResults = 15) {
+  // Let GOOGLE_AUTH_REQUIRED propagate — callers handle it
+  const emails = await getInbox(userId, maxResults);
   if (!emails.length) return [];
 
   // Build a compact numbered list — less tokens than JSON
@@ -142,10 +150,11 @@ export async function triageInbox(maxResults = 15) {
 
 // ─── Draft + Send ─────────────────────────────────────────────────────────────
 
-export async function createDraft(to, subject, body) {
+export async function createDraft(userId, to, subject, body) {
   try {
-    const raw     = Buffer.from(`To: ${to}\r\nSubject: ${subject}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${body}`).toString('base64url');
-    const res     = await gmail().users.drafts.create({ userId: 'me', requestBody: { message: { raw } } });
+    const g   = await gmail(userId);
+    const raw = Buffer.from(`To: ${to}\r\nSubject: ${subject}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${body}`).toString('base64url');
+    const res = await g.users.drafts.create({ userId: 'me', requestBody: { message: { raw } } });
     return { id: res.data.id, to, subject };
   } catch (err) {
     console.error('[gmail] createDraft:', err.message);
@@ -153,10 +162,11 @@ export async function createDraft(to, subject, body) {
   }
 }
 
-export async function sendEmail(to, subject, body) {
+export async function sendEmail(userId, to, subject, body) {
   try {
+    const g   = await gmail(userId);
     const raw = Buffer.from(`To: ${to}\r\nSubject: ${subject}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${body}`).toString('base64url');
-    await gmail().users.messages.send({ userId: 'me', requestBody: { raw } });
+    await g.users.messages.send({ userId: 'me', requestBody: { raw } });
     return { sent: true, to, subject };
   } catch (err) {
     console.error('[gmail] sendEmail:', err.message);
@@ -164,9 +174,10 @@ export async function sendEmail(to, subject, body) {
   }
 }
 
-export async function archiveEmail(messageId) {
+export async function archiveEmail(userId, messageId) {
   try {
-    await gmail().users.messages.modify({
+    const g = await gmail(userId);
+    await g.users.messages.modify({
       userId: 'me',
       id: messageId,
       requestBody: { removeLabelIds: ['INBOX', 'UNREAD'] },
@@ -180,15 +191,16 @@ export async function archiveEmail(messageId) {
 
 // ─── Emails by date range ─────────────────────────────────────────────────────
 
-export async function getEmailsByDateRange(startDate, endDate, maxResults = 30) {
+export async function getEmailsByDateRange(userId, startDate, endDate, maxResults = 30) {
   try {
     const after  = toGmailDate(startDate);
     const before = endDate ? toGmailDate(endDate) : null;
     const q      = `in:inbox after:${after}${before ? ` before:${before}` : ''}`;
 
-    const res      = await gmail().users.messages.list({ userId: 'me', maxResults, q });
+    const g        = await gmail(userId);
+    const res      = await g.users.messages.list({ userId: 'me', maxResults, q });
     const messages = res.data.messages ?? [];
-    const emails   = await Promise.all(messages.map(m => getEmail(m.id, true)));
+    const emails   = await Promise.all(messages.map(m => getEmail(userId, m.id)));
     return emails.filter(Boolean);
   } catch (err) {
     console.error('[gmail] getEmailsByDateRange:', err.message);

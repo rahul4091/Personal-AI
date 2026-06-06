@@ -3,49 +3,53 @@
 
 const BASE = 'https://api.todoist.com/api/v1';
 
-function headers() {
+function headers(creds = {}) {
   return {
-    Authorization: `Bearer ${process.env.TODOIST_API_KEY}`,
+    Authorization: `Bearer ${creds.TODOIST_API_KEY}`,
     'Content-Type': 'application/json',
   };
 }
 
-export function isConfigured() {
-  return !!process.env.TODOIST_API_KEY;
+export function isConfigured(creds = {}) {
+  return !!(creds.TODOIST_API_KEY);
 }
 
 function formatTask(t) {
+  const done = t.is_completed ?? t.checked ?? false;
   return {
-    id:     t.id,
-    title:  t.content,
-    status: t.checked ? 'Done' : 'Not started',
-    source: 'todoist',
+    id:         t.id,
+    title:      t.content,
+    status:     done ? 'Done' : 'Not started',
+    source:     'todoist',
+    due:        t.due?.date ?? null,           // 'YYYY-MM-DD' or null
+    priority:   t.priority ?? 1,              // 1=normal 2=medium 3=high 4=urgent
+    project_id: t.project_id ?? null,
+    labels:     t.labels ?? [],
   };
 }
 
-export async function createTask(title, dueDateString = 'today') {
-  if (!isConfigured()) return null;
-  try {
-    const res = await fetch(`${BASE}/tasks`, {
-      method:  'POST',
-      headers: headers(),
-      body:    JSON.stringify({ content: title, due_string: dueDateString }),
-    });
-    if (!res.ok) throw new Error(`Todoist ${res.status}: ${await res.text()}`);
-    return formatTask(await res.json());
-  } catch (err) {
-    console.error('[todoist] createTask:', err.message);
-    return null;
+export async function createTask(title, dueDateString = 'today', creds = {}) {
+  if (!isConfigured(creds)) throw new Error('Todoist API key not configured');
+  const body = { content: title };
+  if (dueDateString) body.due_string = dueDateString;
+  const res = await fetch(`${BASE}/tasks`, {
+    method:  'POST',
+    headers: headers(creds),
+    body:    JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`Todoist error ${res.status}: ${text || 'unknown error'}`);
   }
+  return formatTask(await res.json());
 }
 
-export async function getTasks(filter = 'today | overdue') {
-  if (!isConfigured()) return [];
+export async function getTasks(filter = 'today | overdue', creds = {}) {
+  if (!isConfigured(creds)) return [];
   try {
-    const res = await fetch(`${BASE}/tasks?filter=${encodeURIComponent(filter)}`, { headers: headers() });
-    if (!res.ok) throw new Error(`Todoist ${res.status}`);
+    const res = await fetch(`${BASE}/tasks?filter=${encodeURIComponent(filter)}`, { headers: headers(creds) });
+    if (!res.ok) throw new Error(`Todoist ${res.status}: ${await res.text().catch(() => '')}`);
     const data = await res.json();
-    // v1 returns { results: [...], next_cursor }
     const tasks = Array.isArray(data) ? data : (data.results ?? []);
     return tasks.map(formatTask);
   } catch (err) {
@@ -54,13 +58,13 @@ export async function getTasks(filter = 'today | overdue') {
   }
 }
 
-export async function updateTaskStatus(taskId, status) {
-  if (!isConfigured()) return null;
+export async function updateTaskStatus(taskId, status, creds = {}) {
+  if (!isConfigured(creds)) return null;
   try {
     const endpoint = status === 'Done'
       ? `${BASE}/tasks/${taskId}/close`
       : `${BASE}/tasks/${taskId}/reopen`;
-    const res = await fetch(endpoint, { method: 'POST', headers: headers() });
+    const res = await fetch(endpoint, { method: 'POST', headers: headers(creds) });
     if (!res.ok) throw new Error(`Todoist ${res.status}`);
     return { id: taskId, status };
   } catch (err) {
@@ -69,14 +73,14 @@ export async function updateTaskStatus(taskId, status) {
   }
 }
 
-export async function updateTask(taskId, patches = {}) {
-  if (!isConfigured()) return null;
+export async function updateTask(taskId, patches = {}, creds = {}) {
+  if (!isConfigured(creds)) return null;
   try {
     const body = {};
     if (patches.title)   body.content    = patches.title;
     if (patches.dueDate) body.due_string = patches.dueDate;
     const res = await fetch(`${BASE}/tasks/${taskId}`, {
-      method: 'POST', headers: headers(), body: JSON.stringify(body),
+      method: 'POST', headers: headers(creds), body: JSON.stringify(body),
     });
     if (!res.ok) throw new Error(`Todoist ${res.status}: ${await res.text()}`);
     return formatTask(await res.json());
@@ -86,10 +90,10 @@ export async function updateTask(taskId, patches = {}) {
   }
 }
 
-export async function deleteTask(taskId) {
-  if (!isConfigured()) return null;
+export async function deleteTask(taskId, creds = {}) {
+  if (!isConfigured(creds)) return null;
   try {
-    const res = await fetch(`${BASE}/tasks/${taskId}`, { method: 'DELETE', headers: headers() });
+    const res = await fetch(`${BASE}/tasks/${taskId}`, { method: 'DELETE', headers: headers(creds) });
     if (!res.ok) throw new Error(`Todoist ${res.status}: ${await res.text()}`);
     return { deleted: true, id: taskId };
   } catch (err) {

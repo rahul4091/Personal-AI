@@ -1,11 +1,12 @@
 import { useState, useEffect } from 'react';
+import { apiFetch } from '../api.js';
 
-export default function DigestPanel({ refreshKey }) {
+export default function DigestPanel({ refreshKey, onGoToSettings }) {
   const [digest,  setDigest]  = useState(null);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    fetch('/api/digest/latest')
+    apiFetch('/api/digest/latest')
       .then(r => r.json())
       .then(d => { if (d) setDigest(d); })
       .catch(() => {});
@@ -13,7 +14,7 @@ export default function DigestPanel({ refreshKey }) {
 
   useEffect(() => {
     if (!refreshKey) return;
-    fetch('/api/digest/latest')
+    apiFetch('/api/digest/latest')
       .then(r => r.json())
       .then(d => { if (d) setDigest(d); })
       .catch(() => {});
@@ -22,7 +23,7 @@ export default function DigestPanel({ refreshKey }) {
   async function runDigest() {
     setLoading(true);
     try {
-      const r = await fetch('/api/digest/run', { method: 'POST' });
+      const r = await apiFetch('/api/digest/run', { method: 'POST' });
       setDigest(await r.json());
     } catch (e) {
       console.error(e);
@@ -57,7 +58,15 @@ export default function DigestPanel({ refreshKey }) {
       {!digest && !loading && (
         <div style={{ textAlign: 'center', padding: '60px 0', color: 'var(--muted)' }}>
           <p style={{ fontSize: 14, marginBottom: 8 }}>No digest yet for today</p>
-          <p style={{ fontSize: 12 }}>Click "Run digest" to pull all sub-agents — result is cached until you refresh</p>
+          <p style={{ fontSize: 12, marginBottom: 16 }}>
+            Connect your tools first, then click "Run digest" to get a summary of emails, calendar, tasks, and code activity.
+          </p>
+          <button
+            onClick={onGoToSettings}
+            style={{ fontSize: 12, color: 'var(--accent)', background: 'none', border: 'none', cursor: 'pointer', padding: 0, textDecoration: 'underline' }}
+          >
+            Go to Settings to connect your tools →
+          </button>
         </div>
       )}
 

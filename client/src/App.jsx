@@ -1,4 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { apiFetch } from './api.js';
+import { ToastContainer } from './toast.jsx';
 import ChatPanel       from './components/ChatPanel.jsx';
 import EmailPanel      from './components/EmailPanel.jsx';
 import CalendarPanel   from './components/CalendarPanel.jsx';
@@ -8,14 +10,29 @@ import LinkedInPanel   from './components/LinkedInPanel.jsx';
 import GitHubPanel     from './components/GitHubPanel.jsx';
 import SlackPanel      from './components/SlackPanel.jsx';
 import TopBar          from './components/TopBar.jsx';
+import NavBar          from './components/NavBar.jsx';
 import AuthPage        from './AuthPage.jsx';
 import OnboardingWizard from './OnboardingWizard.jsx';
 import SettingsPage     from './SettingsPage.jsx';
 
-const VIEWS = ['digest', 'comms', 'calendar', 'tasks', 'content', 'chat'];
+const navItems = [
+  { id: 'digest',   label: "Today's digest", dot: '#888780' },
+  { id: 'comms',    label: 'Comms',          dot: '#1D9E75' },
+  { id: 'calendar', label: 'Calendar',       dot: '#7F77DD' },
+  { id: 'tasks',    label: 'Tasks',          dot: '#D85A30' },
+  { id: 'github',   label: 'GitHub',         dot: '#24292f' },
+  { id: 'linkedin', label: 'LinkedIn',       dot: '#0A66C2' },
+  { id: 'slack',    label: 'Slack',          dot: '#611f69' },
+  { id: 'chat',     label: 'Chat',           dot: '#378ADD' },
+  { id: 'settings', label: 'Settings',       dot: null },
+];
 
 export default function App() {
-  const [view,           setView]           = useState('digest');
+  const VALID_VIEWS = new Set(navItems.map(n => n.id));
+  const [view, setView] = useState(() => {
+    const saved = localStorage.getItem('devos_view');
+    return saved && VALID_VIEWS.has(saved) ? saved : 'digest';
+  });
   const [connected,      setConnected]      = useState(false);
   const [health,         setHealth]         = useState({});
   const [taskRefreshKey,     setTaskRefreshKey]     = useState(0);
@@ -24,10 +41,11 @@ export default function App() {
   const [emailRefreshKey,    setEmailRefreshKey]    = useState(0);
   const [digestRefreshKey,   setDigestRefreshKey]   = useState(0);
 
-  // ─── Auth state ─────────────────────────────────────────────────────────────
-  const [user,         setUser]         = useState(null);
-  const [authChecked,  setAuthChecked]  = useState(false);
+  const [user,           setUser]           = useState(null);
+  const [authChecked,    setAuthChecked]    = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(false);
+
+  const isLoggedIn = !!user;
 
   function handleAuth(newUser, isSignup) {
     setUser(newUser);
@@ -48,6 +66,29 @@ export default function App() {
     setUser(null);
   }
 
+  async function handleConnectGoogle() {
+    try {
+      const r = await apiFetch('/api/auth/google/init');
+      if (r.status === 401) { handleLogout(); return; }
+      let data;
+      try { data = await r.json(); } catch { return; }
+      if (data.url) window.location.href = data.url;
+    } catch { /* network error */ }
+  }
+
+  function fetchHealth() {
+    fetch('/api/health', { headers: { Authorization: `Bearer ${localStorage.getItem('devos_token')}` } })
+      .then(r => r.json())
+      .then(d => { setHealth(d); setConnected(d.google); })
+      .catch(() => {});
+  }
+
+  function handleViewChange(newView) {
+    if (view === 'settings') fetchHealth();
+    localStorage.setItem('devos_view', newView);
+    setView(newView);
+  }
+
   function handleChatAction(panel) {
     if (panel === 'tasks')    setTaskRefreshKey(k => k + 1);
     if (panel === 'calendar') setCalendarRefreshKey(k => k + 1);
@@ -56,19 +97,66 @@ export default function App() {
     if (panel === 'digest')   setDigestRefreshKey(k => k + 1);
   }
 
+  const lastRefreshRef = useRef(Date.now());
+
+  const refreshAll = useCallback(() => {
+    lastRefreshRef.current = Date.now();
+    setTaskRefreshKey(k => k + 1);
+    setCalendarRefreshKey(k => k + 1);
+    setGithubRefreshKey(k => k + 1);
+    setEmailRefreshKey(k => k + 1);
+    setDigestRefreshKey(k => k + 1);
+    fetch('/api/health', { headers: { Authorization: `Bearer ${localStorage.getItem('devos_token')}` } })
+      .then(r => r.json())
+      .then(d => { setHealth(d); setConnected(d.google); })
+      .catch(() => {});
+  }, []);
+
+  // Auto-refresh: on tab focus (if away >5 min) + every 10 min while active
   useEffect(() => {
-    // ── 1. Verify stored token ───────────────────────────────────────────────
+    if (!isLoggedIn) return;
+
+    const STALE_MS = 5 * 60 * 1000;
+    const INTERVAL_MS = 10 * 60 * 1000;
+
+    function onVisibilityChange() {
+      if (document.visibilityState === 'visible') {
+        if (Date.now() - lastRefreshRef.current > STALE_MS) {
+          refreshAll();
+        }
+      }
+    }
+
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    const timer = setInterval(() => {
+      if (document.visibilityState === 'visible') refreshAll();
+    }, INTERVAL_MS);
+
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      clearInterval(timer);
+    };
+  }, [isLoggedIn, refreshAll]);
+
+  useEffect(() => {
     const token = localStorage.getItem('devos_token');
     if (token) {
       fetch('/api/users/me', { headers: { Authorization: `Bearer ${token}` } })
-        .then(r => r.ok ? r.json() : null)
+        .then(async r => {
+          if (r.ok) return r.json();
+          // Only clear the token on 401 (invalid/expired token).
+          // 502/503 means the server is restarting — keep the token so the
+          // user stays logged in once the server comes back up.
+          if (r.status === 401) {
+            localStorage.removeItem('devos_token');
+            localStorage.removeItem('devos_onboarding');
+          }
+          return null;
+        })
         .then(u => {
           if (u) {
             setUser(u);
             if (localStorage.getItem('devos_onboarding') === 'true') setShowOnboarding(true);
-          } else {
-            localStorage.removeItem('devos_token');
-            localStorage.removeItem('devos_onboarding');
           }
           setAuthChecked(true);
         })
@@ -77,31 +165,36 @@ export default function App() {
       setAuthChecked(true);
     }
 
-    // ── 2. Health check ──────────────────────────────────────────────────────
-    fetch('/api/health')
-      .then(r => r.json())
-      .then(d => { setHealth(d); setConnected(d.google); })
-      .catch(() => {});
+    const params = new URLSearchParams(window.location.search);
+    const googleToken = params.get('google_token');
+    if (googleToken) {
+      localStorage.setItem('devos_token', googleToken);
+      window.history.replaceState({}, '', '/');
+      fetch('/api/users/me', { headers: { Authorization: `Bearer ${googleToken}` } })
+        .then(r => r.ok ? r.json() : null)
+        .then(u => { if (u) { setUser(u); setAuthChecked(true); } })
+        .catch(() => {});
+      fetchHealth();
+      return;
+    }
 
-    // ── 3. Google OAuth redirect ─────────────────────────────────────────────
+    if (localStorage.getItem('devos_token')) fetchHealth();
+
     if (window.location.search.includes('connected=true')) {
       setConnected(true);
-      // Don't clear the URL here — OnboardingWizard handles it when active.
       if (localStorage.getItem('devos_onboarding') !== 'true') {
         window.history.replaceState({}, '', '/');
       }
     }
-    // Settings-specific OAuth return (google_connected=true → handled by SettingsPage)
     if (window.location.search.includes('google_connected=true')) {
       setConnected(true);
       setView('settings');
     }
   }, []);
 
-  // ─── Auth gate ──────────────────────────────────────────────────────────────
   if (!authChecked) {
     return (
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', color: 'var(--hint)', fontSize: 'var(--fs-base)' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', color: 'var(--hint)', fontSize: 13 }}>
         Loading…
       </div>
     );
@@ -109,99 +202,30 @@ export default function App() {
   if (!user) return <AuthPage onAuth={handleAuth} />;
   if (showOnboarding) return <OnboardingWizard user={user} onComplete={handleOnboardingComplete} />;
 
-  const navItems = [
-    { id: 'digest',   label: "Today's digest", dot: '#888780' },
-    { id: 'comms',    label: 'Comms',      dot: '#1D9E75' },
-    { id: 'calendar', label: 'Calendar',   dot: '#7F77DD' },
-    { id: 'tasks',    label: 'Tasks',      dot: '#D85A30' },
-    { id: 'github',   label: 'GitHub',     dot: '#24292f' },
-    { id: 'linkedin', label: 'LinkedIn',   dot: '#0A66C2' },
-    { id: 'slack',    label: 'Slack',      dot: '#611f69' },
-    { id: 'chat',     label: 'Chat',       dot: '#378ADD' },
-    { id: 'settings', label: 'Settings',   dot: '#888780' },
-  ];
-
   return (
-    <div style={{ display: 'grid', gridTemplateRows: '48px 1fr', minHeight: '100vh' }}>
-      <TopBar connected={connected} health={health} />
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden' }}>
+      <ToastContainer />
+      <TopBar
+        connected={connected}
+        health={health}
+        user={user}
+        isLoggedIn={isLoggedIn}
+        onLogout={handleLogout}
+        onConnectGoogle={handleConnectGoogle}
+      />
+      <NavBar view={view} setView={handleViewChange} navItems={navItems} />
 
-      <div style={{ display: 'grid', gridTemplateColumns: '200px 1fr', overflow: 'hidden' }}>
-
-        {/* Sidebar */}
-        <aside style={{ background: 'var(--surface)', borderRight: '0.5px solid var(--border)', display: 'flex', flexDirection: 'column', padding: '8px 0' }}>
-
-          <div style={{ padding: '4px 8px', fontSize: 10, fontWeight: 500, color: 'var(--hint)', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: 4 }}>Navigation</div>
-
-          {navItems.filter(n => n.id !== 'settings').map(n => (
-            <button
-              key={n.id}
-              onClick={() => setView(n.id)}
-              style={{
-                display: 'flex', alignItems: 'center', gap: 8,
-                padding: '7px 10px', margin: '1px 4px',
-                borderRadius: 'var(--radius)',
-                border: 'none',
-                background: view === n.id ? 'var(--bg)' : 'transparent',
-                color: view === n.id ? 'var(--text)' : 'var(--muted)',
-                fontWeight: view === n.id ? 500 : 400,
-                textAlign: 'left',
-              }}
-            >
-              <span style={{ width: 7, height: 7, borderRadius: '50%', background: n.dot, flexShrink: 0 }} />
-              {n.label}
-            </button>
-          ))}
-
-          <div style={{ marginTop: 'auto' }}>
-            <div style={{ height: '0.5px', background: 'var(--border)', margin: '4px 0' }} />
-            <button
-              onClick={() => setView('settings')}
-              style={{
-                display: 'flex', alignItems: 'center', gap: 8,
-                padding: '7px 10px', margin: '1px 4px',
-                borderRadius: 'var(--radius)',
-                border: 'none', width: 'calc(100% - 8px)',
-                background: view === 'settings' ? 'var(--bg)' : 'transparent',
-                color: view === 'settings' ? 'var(--text)' : 'var(--muted)',
-                fontWeight: view === 'settings' ? 500 : 400,
-                textAlign: 'left',
-              }}
-            >
-              <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#888780', flexShrink: 0 }} />
-              Settings
-            </button>
-
-            {!connected && (
-              <div style={{ padding: '6px 8px 2px' }}>
-                <a href="/api/auth/google">
-                  <button className="primary" style={{ width: '100%', fontSize: 12 }}>
-                    Connect Google
-                  </button>
-                </a>
-              </div>
-            )}
-            {connected && (
-              <div style={{ fontSize: 11, color: 'var(--success)', textAlign: 'center', padding: '6px 0' }}>
-                ● Google connected
-              </div>
-            )}
-          </div>
-        </aside>
-
-        {/* Main panel — keep all mounted so data isn't re-fetched on every tab switch */}
-        <main style={{ overflow: 'auto', padding: 16, position: 'relative' }}>
-          <div style={{ display: view === 'digest'   ? 'block' : 'none' }}><DigestPanel refreshKey={digestRefreshKey} /></div>
-          <div style={{ display: view === 'comms'    ? 'block' : 'none' }}><EmailPanel connected={connected} refreshKey={emailRefreshKey} /></div>
-          <div style={{ display: view === 'calendar' ? 'block' : 'none' }}><CalendarPanel connected={connected} refreshKey={calendarRefreshKey} /></div>
-          <div style={{ display: view === 'tasks'    ? 'block' : 'none' }}><TaskPanel refreshKey={taskRefreshKey} /></div>
-          <div style={{ display: view === 'github'   ? 'block' : 'none' }}><GitHubPanel health={health} refreshKey={githubRefreshKey} /></div>
-          <div style={{ display: view === 'linkedin' ? 'block' : 'none' }}><LinkedInPanel health={health} /></div>
-          <div style={{ display: view === 'slack'    ? 'block' : 'none' }}><SlackPanel health={health} /></div>
-          <div style={{ display: view === 'chat'     ? 'block' : 'none' }}><ChatPanel onAction={handleChatAction} /></div>
-          {view === 'settings' && <SettingsPage user={user} onLogout={handleLogout} />}
-        </main>
-
-      </div>
+      <main style={{ flex: 1, overflow: view === 'tasks' ? 'hidden' : 'auto', padding: view === 'tasks' ? '20px 24px' : '28px 40px', display: 'flex', flexDirection: 'column' }}>
+        <div style={{ display: view === 'digest'   ? 'block' : 'none' }}><DigestPanel refreshKey={digestRefreshKey} onGoToSettings={() => handleViewChange('settings')} /></div>
+        <div style={{ display: view === 'comms'    ? 'block' : 'none' }}><EmailPanel connected={connected} refreshKey={emailRefreshKey} onConnectGoogle={handleConnectGoogle} onGoToSettings={() => handleViewChange('settings')} /></div>
+        <div style={{ display: view === 'calendar' ? 'block' : 'none' }}><CalendarPanel connected={connected} refreshKey={calendarRefreshKey} onConnectGoogle={handleConnectGoogle} onGoToSettings={() => handleViewChange('settings')} /></div>
+        <div style={{ display: view === 'tasks' ? 'flex' : 'none', flexDirection: 'column', height: '100%' }}><TaskPanel refreshKey={taskRefreshKey} onGoToSettings={() => handleViewChange('settings')} /></div>
+        <div style={{ display: view === 'github'   ? 'block' : 'none' }}><GitHubPanel health={health} refreshKey={githubRefreshKey} onGoToSettings={() => handleViewChange('settings')} /></div>
+        <div style={{ display: view === 'linkedin' ? 'block' : 'none' }}><LinkedInPanel health={health} /></div>
+        <div style={{ display: view === 'slack'    ? 'block' : 'none' }}><SlackPanel health={health} onGoToSettings={() => handleViewChange('settings')} /></div>
+        <div style={{ display: view === 'chat'     ? 'block' : 'none', height: '100%' }}><ChatPanel onAction={handleChatAction} health={health} connected={connected} /></div>
+        {view === 'settings' && <SettingsPage user={user} onLogout={handleLogout} health={health} />}
+      </main>
     </div>
   );
 }

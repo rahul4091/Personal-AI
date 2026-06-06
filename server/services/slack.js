@@ -1,18 +1,27 @@
 // server/services/slack.js
 import { WebClient } from '@slack/web-api';
 
-const client  = new WebClient(process.env.SLACK_BOT_TOKEN);
-const USER_ID = process.env.SLACK_USER_ID;
+function getClient(creds = {}) {
+  return new WebClient(creds.SLACK_BOT_TOKEN);
+}
+
+function getUserId(creds = {}) {
+  return creds.SLACK_USER_ID;
+}
+
+function isConfigured(creds = {}) {
+  return !!(creds.SLACK_BOT_TOKEN) && !!getUserId(creds);
+}
 
 // ─── Send plain text DM ───────────────────────────────────────────────────────
 
-export async function sendDM(text) {
-  if (!process.env.SLACK_BOT_TOKEN || !USER_ID) {
+export async function sendDM(text, creds = {}) {
+  if (!isConfigured(creds)) {
     console.log('[slack] not configured — skipping DM');
     return null;
   }
   try {
-    const res = await client.chat.postMessage({ channel: USER_ID, text });
+    const res = await getClient(creds).chat.postMessage({ channel: getUserId(creds), text });
     return res.ts;
   } catch (err) {
     const code = err.data?.error ?? err.code ?? '';
@@ -24,13 +33,14 @@ export async function sendDM(text) {
 
 // ─── Send rich Block Kit digest ───────────────────────────────────────────────
 
-export async function sendDigest(digest) {
-  if (!process.env.SLACK_BOT_TOKEN || !USER_ID) {
+export async function sendDigest(digest, creds = {}) {
+  if (!isConfigured(creds)) {
     console.log('[slack] not configured — digest not sent');
     return null;
   }
 
   const { comms, calendar, tasks, content } = digest;
+  const userId = getUserId(creds);
 
   const blocks = [
     {
@@ -40,7 +50,6 @@ export async function sendDigest(digest) {
     { type: 'divider' },
   ];
 
-  // Comms section
   if (comms?.pending?.length) {
     blocks.push({
       type: 'section',
@@ -55,7 +64,6 @@ export async function sendDigest(digest) {
     blocks.push({ type: 'divider' });
   }
 
-  // Calendar section
   if (calendar?.conflicts?.length) {
     blocks.push({
       type: 'section',
@@ -71,7 +79,6 @@ export async function sendDigest(digest) {
     blocks.push({ type: 'divider' });
   }
 
-  // Tasks section
   if (tasks?.blockers?.length) {
     blocks.push({
       type: 'section',
@@ -80,7 +87,6 @@ export async function sendDigest(digest) {
     blocks.push({ type: 'divider' });
   }
 
-  // Content section
   if (content?.drafts?.length) {
     blocks.push({
       type: 'section',
@@ -94,7 +100,7 @@ export async function sendDigest(digest) {
   });
 
   try {
-    const res = await client.chat.postMessage({ channel: USER_ID, blocks, text: 'DevOS Morning Digest' });
+    const res = await getClient(creds).chat.postMessage({ channel: userId, blocks, text: 'DevOS Morning Digest' });
     return res.ts;
   } catch (err) {
     const code = err.data?.error ?? err.code ?? '';
@@ -106,9 +112,9 @@ export async function sendDigest(digest) {
 
 // ─── P1 alert ─────────────────────────────────────────────────────────────────
 
-export async function sendAlert(title, body, urgency = 'normal') {
+export async function sendAlert(title, body, urgency = 'normal', creds = {}) {
   const icon = urgency === 'high' ? ':rotating_light:' : ':bell:';
-  return sendDM(`${icon} *${title}*\n${body}`);
+  return sendDM(`${icon} *${title}*\n${body}`, creds);
 }
 
 export default { sendDM, sendDigest, sendAlert };

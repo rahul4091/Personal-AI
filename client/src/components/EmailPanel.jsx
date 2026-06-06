@@ -1,5 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
 import { useCache } from '../hooks/useCache.js';
+import { apiFetch } from '../api.js';
+import NotConnected from './NotConnected.jsx';
+import { toast } from '../toast.jsx';
 
 const TTL_30MIN = 30 * 60 * 1000;
 
@@ -51,20 +54,113 @@ function EmailIframe({ html }) {
   );
 }
 
-export default function EmailPanel({ connected, refreshKey }) {
+// ─── Inline reply draft ───────────────────────────────────────────────────────
+
+function ReplyDraft({ email, toAddr, onSent }) {
+  const [text,    setText]    = useState(email.draftReply || '');
+  const [open,    setOpen]    = useState(false);
+  const [sending, setSending] = useState(false);
+
+  async function send() {
+    if (!text.trim()) return;
+    setSending(true);
+    try {
+      const r = await apiFetch('/api/email/approve-draft', {
+        method: 'POST',
+        body: JSON.stringify({
+          to:       toAddr,
+          subject:  'Re: ' + email.subject,
+          original: email.draftReply,
+          edited:   text,
+        }),
+      });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        throw new Error(d.error || 'Send failed');
+      }
+      toast('Reply sent to ' + toAddr, 'success');
+      onSent(email.id);
+    } catch (e) {
+      toast(e.message, 'error');
+    } finally {
+      setSending(false);
+    }
+  }
+
+  if (!email.draftReply) return null;
+
+  return (
+    <div style={{ borderTop: '0.5px solid var(--border)', background: '#f8fffe', padding: '12px 20px 14px' }}>
+      {!open ? (
+        <button
+          onClick={() => setOpen(true)}
+          style={{
+            fontSize: 12, color: '#1D9E75', fontWeight: 500,
+            background: 'none', border: '1px solid #1D9E75',
+            borderRadius: 6, padding: '5px 12px', cursor: 'pointer',
+            display: 'flex', alignItems: 'center', gap: 6,
+          }}
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+            <polyline points="9,17 4,12 9,7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/>
+          </svg>
+          AI draft ready — click to review &amp; send
+        </button>
+      ) : (
+        <div>
+          <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 6 }}>
+            Reply to <strong>{toAddr}</strong> · Re: {email.subject}
+          </div>
+          <textarea
+            value={text}
+            onChange={e => setText(e.target.value)}
+            rows={4}
+            style={{
+              width: '100%', fontSize: 13, lineHeight: 1.6,
+              border: '1px solid var(--border)', borderRadius: 6,
+              padding: '8px 10px', fontFamily: 'inherit', resize: 'vertical',
+              background: '#fff', color: 'var(--text)',
+            }}
+          />
+          <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+            <button
+              onClick={send}
+              disabled={sending || !text.trim()}
+              className="primary"
+              style={{ fontSize: 12, padding: '6px 14px' }}
+            >
+              {sending ? 'Sending…' : 'Send reply'}
+            </button>
+            <button
+              onClick={() => setOpen(false)}
+              style={{ fontSize: 12, padding: '6px 10px' }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Main panel ───────────────────────────────────────────────────────────────
+
+export default function EmailPanel({ connected, refreshKey, onConnectGoogle, onGoToSettings }) {
   const [emails,     setEmails]     = useState([]);
   const [loading,    setLoading]    = useState(false);
   const [openId,     setOpenId]     = useState(null);
   const [fullEmails, setFullEmails] = useState({});
   const [fetching,   setFetching]   = useState({});
   const [cacheAge,   setCacheAge]   = useState(null);
+  const [authError,  setAuthError]  = useState(false);
   const cache = useCache('devos_emails', TTL_30MIN);
 
   useEffect(() => {
     if (!connected) return;
     const cached = cache.get();
     if (cached) {
-      setEmails(cached.data);
+      setEmails(Array.isArray(cached.data) ? cached.data : []);
       const raw = JSON.parse(localStorage.getItem('devos_emails') || '{}');
       setCacheAge(raw.at ?? Date.now());
       return;
@@ -82,12 +178,19 @@ export default function EmailPanel({ connected, refreshKey }) {
   async function load() {
     setLoading(true);
     setCacheAge(null);
+    setAuthError(false);
     try {
-      const r    = await fetch('/api/emails');
+      const r    = await apiFetch('/api/emails');
+      if (r.status === 401) {
+        const body = await r.json().catch(() => ({}));
+        if (body.error === 'google_auth_required') setAuthError(true);
+        return;
+      }
       const data = await r.json();
-      cache.set({ data });
+      const list = Array.isArray(data) ? data : [];
+      cache.set({ data: list });
       setCacheAge(Date.now());
-      setEmails(data);
+      setEmails(list);
     } finally { setLoading(false); }
   }
 
@@ -106,10 +209,12 @@ export default function EmailPanel({ connected, refreshKey }) {
     // Fallback for stale cache entries that predate htmlBody support
     setFetching(f => ({ ...f, [id]: true }));
     try {
-      const r    = await fetch(`/api/email/${id}`);
+      const r    = await apiFetch(`/api/email/${id}`);
       if (r.ok) {
         const data = await r.json();
         setFullEmails(f => ({ ...f, [id]: data }));
+      } else {
+        toast('Could not load email body', 'error');
       }
     } finally {
       setFetching(f => ({ ...f, [id]: false }));
@@ -117,66 +222,100 @@ export default function EmailPanel({ connected, refreshKey }) {
   }
 
   async function archive(id, e) {
-    e.stopPropagation();
-    await fetch('/api/email/archive', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id }),
-    });
+    e?.stopPropagation();
+    await apiFetch('/api/email/archive', { method: 'POST', body: JSON.stringify({ id }) });
     setEmails(prev => prev.filter(x => x.id !== id));
     if (openId === id) setOpenId(null);
   }
 
+  function onReplySent(id) {
+    // archive after sending so it leaves the triage view
+    archive(id);
+  }
+
   const priorityColor = p => p === 'P1' ? 'var(--danger)' : p === 'P2' ? 'var(--warning)' : 'var(--hint)';
+
+  if (!connected) return (
+    <div>
+      <h2 style={{ fontSize: 16, fontWeight: 500, marginBottom: 4 }}>Comms — triaged inbox</h2>
+      <NotConnected
+        title="Gmail not connected"
+        description="Connect your Google account to triage emails by priority, draft replies, and stay on top of your inbox."
+        primaryLabel="Connect Google"
+        onPrimary={onConnectGoogle}
+        secondaryLabel="Go to Settings"
+        onSecondary={onGoToSettings}
+      />
+    </div>
+  );
 
   return (
     <div>
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
         <h2 style={{ fontSize: 16, fontWeight: 500 }}>Comms — triaged inbox</h2>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          {cacheAge && <span style={{ fontSize: 11, color: 'var(--hint)' }}>cached {formatAge(cacheAge)}</span>}
-          <button onClick={load} disabled={loading}>{loading ? 'Loading…' : 'Refresh'}</button>
-        </div>
+        {cacheAge && <span style={{ fontSize: 11, color: 'var(--hint)' }}>cached {formatAge(cacheAge)}</span>}
       </div>
-
-      {!connected && <p style={{ color: 'var(--muted)' }}>Connect Google to load your inbox.</p>}
       {loading    && <p style={{ color: 'var(--muted)' }}>Triaging inbox…</p>}
+      {authError  && (
+        <div style={{ padding: '16px 0', display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ color: 'var(--danger)', fontSize: 13 }}>Google disconnected</span>
+          <button className="primary" style={{ fontSize: 12, padding: '5px 14px' }} onClick={onConnectGoogle}>
+            Reconnect
+          </button>
+        </div>
+      )}
 
+      <div style={{ border: '1px solid var(--border)', borderRadius: 10, overflow: 'hidden', boxShadow: '0 1px 4px rgba(0,0,0,0.05)' }}>
       {emails.map(email => {
         const isOpen = openId === email.id;
         const full   = fullEmails[email.id];
         const isLoading = fetching[email.id];
 
+        const { name, email: addr } = parseFrom(email.from);
+
         return (
           <div
             key={email.id}
             style={{
-              background:   'var(--surface)',
-              border:       '0.5px solid var(--border)',
               borderLeft:   `3px solid ${priorityColor(email.priority)}`,
-              borderRadius: '0 var(--radius) var(--radius) 0',
-              marginBottom: 8,
+              borderBottom: '1px solid var(--border)',
+              background:   'var(--surface)',
               overflow:     'hidden',
             }}
           >
             {/* Collapsed row */}
             <div
               onClick={() => openEmail(email.id)}
-              style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px', cursor: 'pointer' }}
+              style={{ display: 'flex', alignItems: 'flex-start', gap: 12, padding: '12px 14px', cursor: 'pointer' }}
             >
+              {/* Avatar */}
+              <div style={{
+                width: 36, height: 36, borderRadius: '50%', flexShrink: 0,
+                background: avatarColor(addr || name), color: '#fff',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                fontSize: 15, fontWeight: 600,
+              }}>
+                {(name || addr).charAt(0).toUpperCase()}
+              </div>
+
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--text)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  {email.subject}
+                {/* Sender name + email */}
+                <div style={{ fontSize: 13, lineHeight: 1.4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  <span style={{ fontWeight: 600, color: 'var(--text)' }}>{name}</span>
+                  {addr && <span style={{ color: 'var(--hint)', marginLeft: 4 }}>&lt;{addr}&gt;</span>}
                 </div>
-                <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 2, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  {email.from}
-                  {!isOpen && email.snippet && (
-                    <span style={{ color: 'var(--hint)', marginLeft: 6 }}>— {email.snippet.slice(0, 60)}…</span>
-                  )}
+                {/* Preview: subject, then snippet */}
+                <div style={{
+                  fontSize: 12, color: 'var(--muted)', marginTop: 3, lineHeight: 1.45,
+                  display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden',
+                }}>
+                  {email.subject}
+                  {email.snippet && <span style={{ color: 'var(--hint)' }}> — {email.snippet}</span>}
                 </div>
               </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0, marginTop: 2 }}>
                 <span style={{ fontSize: 11, color: 'var(--hint)' }}>
                   {new Date(email.date).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}
                 </span>
@@ -200,11 +339,11 @@ export default function EmailPanel({ connected, refreshKey }) {
                       {/* Avatar */}
                       <div style={{
                         width: 36, height: 36, borderRadius: '50%', flexShrink: 0,
-                        background: '#1a73e8', color: '#fff',
+                        background: avatarColor(addr || name), color: '#fff',
                         display: 'flex', alignItems: 'center', justifyContent: 'center',
                         fontSize: 15, fontWeight: 500,
                       }}>
-                        {(full?.from || email.from).charAt(0).toUpperCase()}
+                        {(name || addr).charAt(0).toUpperCase()}
                       </div>
                       <div>
                         <div style={{ fontSize: 13, fontWeight: 500, color: '#202124' }}>
@@ -242,6 +381,9 @@ export default function EmailPanel({ connected, refreshKey }) {
                   )}
                 </div>
 
+                {/* AI reply draft */}
+                <ReplyDraft email={email} toAddr={addr || email.from} onSent={onReplySent} />
+
                 {/* Action bar */}
                 <div style={{
                   display: 'flex', alignItems: 'center', gap: 10,
@@ -264,6 +406,8 @@ export default function EmailPanel({ connected, refreshKey }) {
         );
       })}
 
+      </div>
+
       {!loading && emails.length === 0 && connected && (
         <p style={{ color: 'var(--muted)', textAlign: 'center', paddingTop: 40 }}>Inbox clear ✓</p>
       )}
@@ -276,4 +420,20 @@ function formatAge(at) {
   if (mins < 1)  return 'just now';
   if (mins < 60) return `${mins}m ago`;
   return `${Math.floor(mins / 60)}h ago`;
+}
+
+// Split a "Name <email>" header into its two parts.
+function parseFrom(from = '') {
+  const m = from.match(/^\s*"?(.*?)"?\s*<(.+?)>\s*$/);
+  if (m) return { name: (m[1].trim() || m[2].trim()), email: m[2].trim() };
+  return { name: from.trim(), email: '' };
+}
+
+const AVATAR_COLORS = ['#1a73e8', '#34A853', '#9334e6', '#e8710a', '#d93025', '#129eaf', '#a142f4', '#e52592'];
+
+// Deterministic avatar color from the sender so it stays stable per contact.
+function avatarColor(str = '') {
+  let h = 0;
+  for (let i = 0; i < str.length; i++) h = str.charCodeAt(i) + ((h << 5) - h);
+  return AVATAR_COLORS[Math.abs(h) % AVATAR_COLORS.length];
 }

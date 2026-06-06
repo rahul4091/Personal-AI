@@ -19,9 +19,21 @@ export async function initDB() {
   try {
     const { default: pkg } = await import('pg');
     const Pool = pkg.Pool ?? pkg;
+    // Neon (and most hosted Postgres) requires SSL.
+    // rejectUnauthorized:false works everywhere; for Neon the cert is valid so
+    // we can set it to true when the URL contains neon.tech.
+    const isNeon = process.env.DATABASE_URL.includes('neon.tech');
+    // Add uselibpqcompat to silence pg's SSL deprecation warning on Neon URLs
+    const connStr = isNeon && !process.env.DATABASE_URL.includes('uselibpqcompat')
+      ? process.env.DATABASE_URL.replace('sslmode=require', 'sslmode=require&uselibpqcompat=true')
+      : process.env.DATABASE_URL;
     pool = new Pool({
-      connectionString: process.env.DATABASE_URL,
-      ssl: { rejectUnauthorized: false },
+      connectionString: connStr,
+      ssl: isNeon ? { rejectUnauthorized: true } : { rejectUnauthorized: false },
+      // Neon serverless connections can be idle-dropped — keep pool small
+      max: isNeon ? 5 : 10,
+      idleTimeoutMillis: isNeon ? 10000 : 30000,
+      connectionTimeoutMillis: 5000,
     });
 
     // ── Users table ───────────────────────────────────────────────────────────
@@ -31,14 +43,13 @@ export async function initDB() {
         username      TEXT UNIQUE NOT NULL,
         email         TEXT UNIQUE,
         password_hash TEXT NOT NULL,
+        google_id     TEXT UNIQUE,
         is_active     BOOLEAN DEFAULT TRUE,
         created_at    TIMESTAMPTZ DEFAULT NOW()
       )
     `);
-    // Migrate existing tables that predate is_active
-    await pool.query(`
-      ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE
-    `);
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active  BOOLEAN DEFAULT TRUE`);
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS google_id  TEXT UNIQUE`);
 
     // ── User integrations table ───────────────────────────────────────────────
     // Stores one encrypted key/value per row, keyed by (user_id, service, key_name).
@@ -56,7 +67,7 @@ export async function initDB() {
       )
     `);
 
-    console.log('[db] Postgres connected — schema ready (users + user_integrations)');
+    console.log(`[db] ${isNeon ? 'Neon' : 'Postgres'} connected — schema ready (users + user_integrations)`);
   } catch (err) {
     console.error('[db] Postgres init failed:', err.message, '— falling back to JSON store');
     pool = null;
@@ -157,4 +168,52 @@ export async function dbDeleteUser(userId) {
     return;
   }
   saveUsers(readUsers().filter(u => String(u.id) !== String(userId)));
+}
+
+export async function dbFindByGoogleId(googleId) {
+  if (pool) {
+    const r = await pool.query('SELECT * FROM users WHERE google_id = $1', [googleId]);
+    return r.rows[0] ?? null;
+  }
+  return readUsers().find(u => u.googleId === googleId) ?? null;
+}
+
+export async function dbFindByEmail(email) {
+  if (pool) {
+    const r = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    return r.rows[0] ?? null;
+  }
+  return readUsers().find(u => u.email === email) ?? null;
+}
+
+export async function dbLinkGoogleId(userId, googleId) {
+  if (pool) {
+    await pool.query('UPDATE users SET google_id = $1 WHERE id = $2', [googleId, userId]);
+    return;
+  }
+  const users = readUsers();
+  const idx = users.findIndex(u => String(u.id) === String(userId));
+  if (idx >= 0) { users[idx].googleId = googleId; saveUsers(users); }
+}
+
+export async function dbCreateGoogleUser({ username, email, googleId }) {
+  const lc = username.toLowerCase();
+  if (pool) {
+    const r = await pool.query(
+      `INSERT INTO users (username, email, password_hash, google_id)
+       VALUES ($1, $2, 'GOOGLE_AUTH_ONLY', $3)
+       RETURNING id, username, email, is_active AS "isActive", created_at AS "createdAt"`,
+      [lc, email || null, googleId]
+    );
+    return r.rows[0];
+  }
+  const users = readUsers();
+  if (users.find(u => u.username === lc)) throw new Error('Username already taken');
+  const user = {
+    id: Date.now(), username: lc, email: email || null,
+    passwordHash: 'GOOGLE_AUTH_ONLY', googleId,
+    isActive: true, createdAt: new Date().toISOString(),
+  };
+  saveUsers([...users, user]);
+  return { id: user.id, username: user.username, email: user.email, isActive: user.isActive, createdAt: user.createdAt };
 }

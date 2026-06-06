@@ -3,15 +3,16 @@ import { google } from 'googleapis';
 import { getAuthClient } from './auth.js';
 import llm from './llm.js';
 
-function cal() {
-  return google.calendar({ version: 'v3', auth: getAuthClient() });
+async function cal(userId) {
+  return google.calendar({ version: 'v3', auth: await getAuthClient(userId) });
 }
 
 // ─── Read events ──────────────────────────────────────────────────────────────
 
-export async function getUpcoming(maxResults = 10) {
+export async function getUpcoming(userId, maxResults = 10) {
   try {
-    const res = await cal().events.list({
+    const c   = await cal(userId);
+    const res = await c.events.list({
       calendarId: 'primary',
       timeMin:    new Date().toISOString(),
       maxResults,
@@ -21,16 +22,22 @@ export async function getUpcoming(maxResults = 10) {
 
     return (res.data.items ?? []).map(formatEvent);
   } catch (err) {
+    if (err.code === 401 || err.message?.includes('invalid_grant') || err.message?.includes('Token has been expired')) {
+      const authErr = new Error('Google authentication required');
+      authErr.code = 'GOOGLE_AUTH_REQUIRED';
+      throw authErr;
+    }
     console.error('[calendar] getUpcoming:', err.message);
     return [];
   }
 }
 
-export async function getWeekEvents() {
+export async function getWeekEvents(userId) {
   try {
     const now  = new Date();
     const week = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
-    const res  = await cal().events.list({
+    const c    = await cal(userId);
+    const res  = await c.events.list({
       calendarId:   'primary',
       timeMin:      now.toISOString(),
       timeMax:      week.toISOString(),
@@ -40,6 +47,11 @@ export async function getWeekEvents() {
     });
     return (res.data.items ?? []).map(formatEvent);
   } catch (err) {
+    if (err.code === 401 || err.message?.includes('invalid_grant') || err.message?.includes('Token has been expired')) {
+      const authErr = new Error('Google authentication required');
+      authErr.code = 'GOOGLE_AUTH_REQUIRED';
+      throw authErr;
+    }
     console.error('[calendar] getWeekEvents:', err.message);
     return [];
   }
@@ -60,13 +72,14 @@ function formatEvent(e) {
 
 // ─── Create event ─────────────────────────────────────────────────────────────
 
-export async function createEvent(title, startISO, durationMinutes = 60, description = '') {
+export async function createEvent(userId, title, startISO, durationMinutes = 60, description = '') {
   try {
     const start = new Date(startISO);
     const end   = new Date(start.getTime() + durationMinutes * 60 * 1000);
     const tz    = process.env.USER_TIMEZONE ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
 
-    const res = await cal().events.insert({
+    const c   = await cal(userId);
+    const res = await c.events.insert({
       calendarId: 'primary',
       requestBody: {
         summary:     title,
@@ -89,7 +102,7 @@ export async function createEvent(title, startISO, durationMinutes = 60, descrip
 const RRULE_DAY = { 1: 'MO', 2: 'TU', 3: 'WE', 4: 'TH', 5: 'FR', 6: 'SA', 7: 'SU' };
 const ISO_TO_JS  = { 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 0 }; // JS getDay() uses 0=Sun
 
-export async function createRecurringEvent(title, days, time, durationMinutes = 60, description = '') {
+export async function createRecurringEvent(userId, title, days, time, durationMinutes = 60, description = '') {
   if (!days?.length) throw new Error('At least one day is required');
   if (!/^\d{1,2}:\d{2}$/.test(time)) throw new Error('time must be HH:MM');
 
@@ -111,7 +124,8 @@ export async function createRecurringEvent(title, days, time, durationMinutes = 
   const end = new Date(start.getTime() + durationMinutes * 60 * 1000);
 
   try {
-    const res = await cal().events.insert({
+    const c   = await cal(userId);
+    const res = await c.events.insert({
       calendarId: 'primary',
       requestBody: {
         summary:    title,
@@ -130,8 +144,8 @@ export async function createRecurringEvent(title, days, time, durationMinutes = 
 
 // ─── Conflict detection ───────────────────────────────────────────────────────
 
-export async function scanConflicts() {
-  const events    = await getWeekEvents();
+export async function scanConflicts(userId) {
+  const events    = await getWeekEvents(userId);
   const conflicts = [];
 
   for (let i = 0; i < events.length - 1; i++) {
@@ -155,8 +169,8 @@ export async function scanConflicts() {
 
 // ─── Focus block protection ───────────────────────────────────────────────────
 
-export async function blockFocusTime(projectName = 'Deep work', minBlockMinutes = 90) {
-  const events   = await getWeekEvents();
+export async function blockFocusTime(userId, projectName = 'Deep work', minBlockMinutes = 90) {
+  const events   = await getWeekEvents(userId);
   const blocks   = [];
   const timezone = process.env.USER_TIMEZONE ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
 
@@ -169,6 +183,7 @@ export async function blockFocusTime(projectName = 'Deep work', minBlockMinutes 
     // Only block during working hours (9-18) and gaps big enough
     if (gapMin >= minBlockMinutes && hour >= 9 && hour <= 16) {
       const created = await createEvent(
+        userId,
         `Focus — ${projectName}`,
         gapStart.toISOString(),
         Math.min(gapMin, 120),
@@ -213,26 +228,27 @@ Return a JSON object:
 
 // ─── Find event by title (for chat commands that don't know the ID) ───────────
 
-async function findByTitle(title) {
-  const events = await getUpcoming(30);
+async function findByTitle(userId, title) {
+  const events = await getUpcoming(userId, 30);
   const q = title.toLowerCase();
   return events.find(e => e.title.toLowerCase().includes(q)) ?? null;
 }
 
 // ─── Delete event ─────────────────────────────────────────────────────────────
 
-export async function deleteEvent(idOrTitle) {
+export async function deleteEvent(userId, idOrTitle) {
   try {
     let eventId = idOrTitle;
     let title   = idOrTitle;
     // Heuristic: Google event IDs are long alphanumeric strings
     if (!/^[a-zA-Z0-9_]{15,}$/.test(idOrTitle)) {
-      const ev = await findByTitle(idOrTitle);
+      const ev = await findByTitle(userId, idOrTitle);
       if (!ev) throw new Error(`No upcoming event found matching "${idOrTitle}"`);
       eventId = ev.id;
       title   = ev.title;
     }
-    await cal().events.delete({ calendarId: 'primary', eventId });
+    const c = await cal(userId);
+    await c.events.delete({ calendarId: 'primary', eventId });
     return { deleted: true, id: eventId, title };
   } catch (err) {
     console.error('[calendar] deleteEvent:', err.message);
@@ -243,12 +259,12 @@ export async function deleteEvent(idOrTitle) {
 // ─── Update event ─────────────────────────────────────────────────────────────
 // patches: { title?, date?, duration? }
 
-export async function updateEvent(idOrTitle, patches = {}) {
+export async function updateEvent(userId, idOrTitle, patches = {}) {
   try {
     let eventId = idOrTitle;
     let current = null;
     if (!/^[a-zA-Z0-9_]{15,}$/.test(idOrTitle)) {
-      current = await findByTitle(idOrTitle);
+      current = await findByTitle(userId, idOrTitle);
       if (!current) throw new Error(`No upcoming event found matching "${idOrTitle}"`);
       eventId = current.id;
     }
@@ -263,7 +279,8 @@ export async function updateEvent(idOrTitle, patches = {}) {
       requestBody.end   = { dateTime: new Date(start.getTime() + durMin * 60000).toISOString(), timeZone: tz };
     }
 
-    const res = await cal().events.patch({ calendarId: 'primary', eventId, requestBody });
+    const c   = await cal(userId);
+    const res = await c.events.patch({ calendarId: 'primary', eventId, requestBody });
     return formatEvent(res.data);
   } catch (err) {
     console.error('[calendar] updateEvent:', err.message);

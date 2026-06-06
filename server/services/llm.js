@@ -1,13 +1,16 @@
 // server/services/llm.js
-// Smart LLM router — Gemini 2.5 Flash (large context)
-//                     Groq Llama 3.3 70B (fast triage)
-//                     Ollama (offline fallback)
+// LangChain-powered LLM router.
+//   Gemini 2.0 Flash (large context)  → @langchain/google-genai
+//   Groq Llama 3.1 8B  (fast triage)   → @langchain/groq
+// Provider selection is task-based; cross-provider failover uses LangChain's
+// native .withFallbacks(). Public function signatures are unchanged so every
+// existing caller (index.js, gmail.js, content.js, calendar.js) keeps working.
 
-import OpenAI from 'openai';
+import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
+import { ChatGroq } from '@langchain/groq';
+import { SystemMessage, HumanMessage, AIMessage } from '@langchain/core/messages';
 
-// Task type → provider routing
-// Gemini handles everything — better free-tier RPM and structured JSON output
-// Groq is the fast fallback
+// Task type → preferred provider (the other becomes the fallback)
 const TASK_ROUTING = {
   digest:    'gemini',
   brief:     'gemini',
@@ -16,142 +19,99 @@ const TASK_ROUTING = {
   readme:    'gemini',
   research:  'gemini',
   data:      'gemini',
-  chat:      'gemini',
-  triage:    'gemini',
-  classify:  'gemini',
+  chat:      'groq',
+  triage:    'groq',
+  classify:  'groq',
   blocker:   'gemini',
-  intent:    'gemini',
-  alert:     'gemini',
+  intent:    'groq',
+  alert:     'groq',
 };
 
 const MODELS = {
-  gemini: 'gemini-2.0-flash',       // gemini-1.5-flash deprecated May 2026
-  groq:   'llama-3.1-8b-instant',  // 20,000 req/day free vs 6,000 for 70b
-  ollama: 'llama3.2',
+  gemini: 'gemini-2.0-flash',
+  groq:   'llama-3.1-8b-instant',
 };
 
-// Clients are created lazily so the server starts even when API keys are missing
-const _clients = {};
+// ─── Helpers ────────────────────────────────────────────────────────────────
 
-function getClient(provider) {
-  if (!_clients[provider]) {
-    if (provider === 'gemini') {
-      if (!process.env.GEMINI_API_KEY) {
-        const err = new Error('GEMINI_API_KEY is not set in .env');
-        err.code = 'MISSING_API_KEY';
-        throw err;
-      }
-      _clients.gemini = new OpenAI({
-        apiKey:  process.env.GEMINI_API_KEY,
-        baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/',
-      });
-    } else if (provider === 'groq') {
-      if (!process.env.GROQ_API_KEY) {
-        const err = new Error('GROQ_API_KEY is not set in .env');
-        err.code = 'MISSING_API_KEY';
-        throw err;
-      }
-      _clients.groq = new OpenAI({
-        apiKey:  process.env.GROQ_API_KEY,
-        baseURL: 'https://api.groq.com/openai/v1',
-      });
-    } else {
-      _clients.ollama = new OpenAI({
-        apiKey:  'ollama',
-        baseURL: process.env.OLLAMA_ENDPOINT
-          ? `${process.env.OLLAMA_ENDPOINT}/v1`
-          : 'http://localhost:11434/v1',
-      });
-    }
-  }
-  return _clients[provider];
+export function resolveKey(provider, apiKeys = {}) {
+  if (provider === 'gemini') return apiKeys.GEMINI_API_KEY || process.env.GEMINI_API_KEY || null;
+  if (provider === 'groq')   return apiKeys.GROQ_API_KEY   || process.env.GROQ_API_KEY   || null;
+  return null;
 }
 
-async function callProvider(provider, params, json) {
-  const client = getClient(provider);
-  // Gemini's OpenAI compat layer returns 400 on response_format for some prompts;
-  // rely on system prompt + regex cleanup instead
-  const { response_format, ...rest } = params;
-  const callParams = provider === 'gemini' ? rest : params;
-  const res = await client.chat.completions.create({ ...callParams, model: MODELS[provider] });
-  const c   = res.choices[0].message.content;
-  if (json) {
-    try {
-      return JSON.parse(c.replace(/```json\n?|\n?```/g, '').trim());
-    } catch {
-      throw new Error(`[${provider}] invalid JSON in response: ${c.slice(0, 120)}`);
-    }
+function buildModel(provider, apiKey, maxTokens, streaming) {
+  if (provider === 'gemini') {
+    return new ChatGoogleGenerativeAI({
+      model: MODELS.gemini, apiKey, maxOutputTokens: maxTokens, streaming,
+    });
   }
-  return c;
+  return new ChatGroq({
+    model: MODELS.groq, apiKey, maxTokens, streaming,
+  });
 }
+
+// Build a runnable for a task: preferred provider first, the other as fallback.
+// Skips any provider without a key. Throws MISSING_API_KEY if none configured.
+function buildChain(taskType, { maxTokens, apiKeys, streaming = false }) {
+  const provider = TASK_ROUTING[taskType] ?? 'gemini';
+  const order    = [provider, ...['gemini', 'groq'].filter(p => p !== provider)];
+
+  const models = order
+    .map(p => ({ p, key: resolveKey(p, apiKeys) }))
+    .filter(x => x.key)
+    .map(x => ({ p: x.p, model: buildModel(x.p, x.key, maxTokens, streaming) }));
+
+  if (!models.length) {
+    const err = new Error('No LLM API key configured — set GEMINI_API_KEY or GROQ_API_KEY (or add one in Settings)');
+    err.code = 'MISSING_API_KEY';
+    throw err;
+  }
+
+  console.log(`[llm] ${taskType} → ${models.map(m => m.p).join(' → ')}`);
+
+  const [primary, ...rest] = models.map(m => m.model);
+  return rest.length ? primary.withFallbacks({ fallbacks: rest }) : primary;
+}
+
+// Convert our { role, content } messages into LangChain message instances.
+function toLC(messages) {
+  return messages.map(m => {
+    if (m.role === 'system') return new SystemMessage(m.content);
+    if (m.role === 'assistant' || m.role === 'ai') return new AIMessage(m.content);
+    return new HumanMessage(m.content);
+  });
+}
+
+function textOf(content) {
+  return typeof content === 'string' ? content : JSON.stringify(content);
+}
+
+function parseJSON(raw, provider = 'llm') {
+  try {
+    return JSON.parse(raw.replace(/```json\n?|\n?```/g, '').trim());
+  } catch {
+    throw new Error(`[${provider}] invalid JSON in response: ${raw.slice(0, 120)}`);
+  }
+}
+
+// ─── Public API (unchanged signatures) ───────────────────────────────────────
 
 export async function call(messages, options = {}) {
   const {
     taskType  = 'chat',
     json      = false,
-    tools     = null,
     maxTokens = 500,
+    apiKeys   = {},
   } = options;
 
-  const provider = TASK_ROUTING[taskType] ?? 'gemini';
-
-  const params = {
-    messages,
-    max_tokens: maxTokens,
-    ...(json  && { response_format: { type: 'json_object' } }),
-    ...(tools && { tools, tool_choice: 'auto' }),
-  };
-
-  // Ollama only included if it's configured/installed
-  const hasOllama = process.env.OLLAMA_ENDPOINT || false;
-  const fallbackChain = hasOllama ? ['gemini', 'groq', 'ollama'] : ['gemini', 'groq'];
-
-  let lastErr;
-  for (const p of fallbackChain) {
-    try {
-      console.log(`[llm] ${taskType} → ${p} (${MODELS[p]})`);
-      return await callProvider(p, params, json);
-    } catch (err) {
-      const errCode      = err.code ?? err.cause?.code;
-      const rateLimited  = err.status === 429;
-      const notFound     = err.status === 404;
-      const offline      = errCode === 'ECONNREFUSED' || errCode === 'ENOTFOUND';
-      const missingKey   = errCode === 'MISSING_API_KEY';
-      if (!rateLimited && !offline && !missingKey && !notFound) throw err;
-
-      if (rateLimited) {
-        const match  = err.message.match(/try again in (\d+(?:\.\d+)?)\s*(ms|s)/i);
-        const waitMs = match ? (match[2] === 'ms' ? parseFloat(match[1]) : parseFloat(match[1]) * 1000) : null;
-
-        // Only retry the same provider when the API told us exactly how long to wait AND it's short
-        if (waitMs !== null && waitMs <= 10000) {
-          console.warn(`[llm] ${p} rate-limited — waiting ${Math.ceil(waitMs)}ms then retrying`);
-          await new Promise(r => setTimeout(r, waitMs + 300));
-          try {
-            return await callProvider(p, params, json);
-          } catch (retryErr) {
-            const retryCode = retryErr.code ?? retryErr.cause?.code;
-            if (retryErr.status !== 429 && retryCode !== 'ECONNREFUSED') throw retryErr;
-            lastErr = retryErr;
-          }
-        } else {
-          // No specific wait time or wait is too long — fall through to next provider immediately
-          console.warn(`[llm] ${p} rate-limited → falling through to next provider`);
-          lastErr = err;
-        }
-        continue;
-      }
-
-      console.warn(`[llm] ${p} unavailable (${err.message}) → trying next provider`);
-      lastErr = err;
-    }
-  }
-
-  console.error('[llm] all providers failed:', lastErr?.message);
-  throw lastErr;
+  const chain = buildChain(taskType, { maxTokens, apiKeys });
+  const res   = await chain.invoke(toLC(messages), { runName: `llm:${taskType}`, tags: ['devos', taskType] });
+  const out   = textOf(res.content);
+  return json ? parseJSON(out, taskType) : out;
 }
 
-// Backwards-compatible chat() — same signature as old ollama.js
+// Backwards-compatible simple chat helper
 export async function chat(userMessage, systemPrompt = 'You are a helpful personal AI assistant.') {
   return call(
     [
@@ -184,27 +144,38 @@ Intent guide — pick the single closest match per action:
 - general_chat: anything that does not clearly match the intents above
 `.trim();
 
-// classify() — returns structured JSON matching schema
-export async function classify(text, schema) {
+// classify() — returns structured JSON matching the schema
+export async function classify(text, schema, apiKeys = {}) {
   return call(
     [
       { role: 'system', content: `JSON only. Omit null/empty params.\n${INTENT_GUIDE}\nSchema:\n${schema}` },
       { role: 'user',   content: text },
     ],
-    { taskType: 'classify', json: true, maxTokens: 800 }
+    { taskType: 'classify', json: true, maxTokens: 800, apiKeys }
   );
 }
 
-// generate() — summary/content generation
-export async function generate(prompt, context = '', taskType = 'digest') {
+// generate() — summary / content generation
+export async function generate(prompt, context = '', taskType = 'digest', apiKeys = {}) {
   return call(
     [
       { role: 'system', content: 'Be concise and accurate.' },
       ...(context ? [{ role: 'user', content: `Context:\n${context}` }] : []),
       { role: 'user', content: prompt },
     ],
-    { taskType, maxTokens: 600 }
+    { taskType, maxTokens: 600, apiKeys }
   );
 }
 
-export default { call, chat, classify, generate };
+// Streaming call — yields text tokens via async generator (LangChain .stream()).
+export async function* streamTokens(messages, options = {}) {
+  const { taskType = 'chat', maxTokens = 600, apiKeys = {} } = options;
+  const chain  = buildChain(taskType, { maxTokens, apiKeys, streaming: true });
+  const stream = await chain.stream(toLC(messages), { runName: `llm:${taskType}`, tags: ['devos', taskType] });
+  for await (const chunk of stream) {
+    const t = chunk?.content;
+    if (typeof t === 'string' && t) yield t;
+  }
+}
+
+export default { call, chat, classify, generate, streamTokens };

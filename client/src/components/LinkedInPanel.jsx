@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { apiFetch } from '../api.js';
 
 export default function LinkedInPanel({ health = {} }) {
   const [source,   setSource]   = useState('');
@@ -12,9 +13,8 @@ export default function LinkedInPanel({ health = {} }) {
     setLoading('gen');
     setStatus('');
     try {
-      const r = await fetch('/api/content/linkedin', {
+      const r = await apiFetch('/api/content/linkedin', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ source }),
       });
       const data = await r.json();
@@ -28,9 +28,8 @@ export default function LinkedInPanel({ health = {} }) {
     const variant = draft.variants[selected];
     setLoading(postNow ? 'posting' : 'saving');
     try {
-      const r = await fetch('/api/content/approve', {
+      const r = await apiFetch('/api/content/approve', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ original: draft.variants[0].body, edited: variant.body, type: 'linkedin', postNow }),
       });
       const data = await r.json();
