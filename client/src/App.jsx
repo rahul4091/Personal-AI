@@ -239,7 +239,7 @@ export default function App() {
         <div style={{
           flex: 1,
           overflow: isTasksView ? 'hidden' : 'auto',
-          padding: isTasksView ? '24px 28px' : isChatView ? '0' : '32px 36px',
+          padding: isTasksView ? '24px 28px' : isChatView ? '24px 28px' : '32px 36px',
           display: 'flex',
           flexDirection: 'column',
         }}>
@@ -250,7 +250,7 @@ export default function App() {
           <div style={{ display: view === 'github'   ? 'block' : 'none' }}><GitHubPanel health={health} refreshKey={githubRefreshKey} onGoToSettings={() => handleViewChange('settings')} /></div>
           <div style={{ display: view === 'linkedin' ? 'block' : 'none' }}><LinkedInPanel health={health} /></div>
           <div style={{ display: view === 'slack'    ? 'block' : 'none' }}><SlackPanel health={health} onGoToSettings={() => handleViewChange('settings')} /></div>
-          <div style={{ display: isChatView ? 'flex' : 'none', flex: 1, flexDirection: 'column', height: '100%' }}><ChatPanel onAction={handleChatAction} health={health} connected={connected} /></div>
+          <div style={{ display: isChatView ? 'flex' : 'none', flex: 1, flexDirection: 'column', minHeight: 0 }}><ChatPanel onAction={handleChatAction} health={health} connected={connected} /></div>
           {view === 'settings' && <SettingsPage user={user} onLogout={handleLogout} health={health} />}
           {view === 'admin'    && <AdminPage user={user} />}
         </div>

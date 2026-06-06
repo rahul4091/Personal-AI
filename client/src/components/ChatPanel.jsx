@@ -455,14 +455,24 @@ export default function ChatPanel({ onAction, health = {}, connected = false }) 
       {/* Input area */}
       <div style={{
         flexShrink: 0,
-        background: 'var(--surface)',
-        border: '1px solid var(--border)',
-        borderRadius: 14,
-        padding: '10px 12px',
+        marginTop: 12,
+        background: 'var(--bg)',
+        border: '1.5px solid var(--border)',
+        borderRadius: 16,
+        padding: '10px 10px 10px 14px',
         display: 'flex', alignItems: 'flex-end', gap: 8,
-        boxShadow: '0 1px 4px rgba(0,0,0,0.04)',
-        marginTop: 8,
-      }}>
+        boxShadow: '0 0 0 4px rgba(0,0,0,0.03), 0 2px 8px rgba(0,0,0,0.06)',
+        transition: 'border-color 0.15s, box-shadow 0.15s',
+      }}
+        onFocusCapture={e => {
+          e.currentTarget.style.borderColor = 'var(--accent)';
+          e.currentTarget.style.boxShadow = '0 0 0 4px rgba(29,158,117,0.10), 0 2px 8px rgba(0,0,0,0.06)';
+        }}
+        onBlurCapture={e => {
+          e.currentTarget.style.borderColor = 'var(--border)';
+          e.currentTarget.style.boxShadow = '0 0 0 4px rgba(0,0,0,0.03), 0 2px 8px rgba(0,0,0,0.06)';
+        }}
+      >
         <textarea
           ref={textareaRef}
           placeholder="Message DevOS…"
@@ -477,16 +487,17 @@ export default function ChatPanel({ onAction, health = {}, connected = false }) 
             outline: 'none',
             resize: 'none',
             background: 'transparent',
-            fontSize: 13,
+            fontSize: 13.5,
             lineHeight: 1.6,
             color: 'var(--text)',
             fontFamily: 'inherit',
-            padding: 0,
+            padding: '2px 0',
             overflowY: 'auto',
             maxHeight: 160,
+            boxShadow: 'none',
           }}
         />
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0, paddingBottom: 1 }}>
           {/* Mic button */}
           <button
             onClick={toggleListening}
@@ -494,8 +505,8 @@ export default function ChatPanel({ onAction, health = {}, connected = false }) 
             style={{
               width: 34, height: 34, borderRadius: 10, padding: 0,
               border: `1px solid ${listening ? '#D85A30' : 'var(--border)'}`,
-              background: listening ? '#fff3f0' : 'transparent',
-              color: listening ? '#D85A30' : 'var(--hint)',
+              background: listening ? '#fff3f0' : 'var(--surface)',
+              color: listening ? '#D85A30' : 'var(--muted)',
               display: 'flex', alignItems: 'center', justifyContent: 'center',
               cursor: 'pointer',
               transition: 'all 0.15s',
@@ -520,23 +531,27 @@ export default function ChatPanel({ onAction, health = {}, connected = false }) 
             style={{
               width: 34, height: 34,
               borderRadius: 10,
-              background: input.trim() && !loading ? 'var(--accent)' : 'var(--bg)',
-              border: '1px solid ' + (input.trim() && !loading ? 'var(--accent)' : 'var(--border)'),
-              color: input.trim() && !loading ? '#fff' : 'var(--hint)',
+              background: input.trim() && !loading ? 'var(--accent)' : '#E8E7E3',
+              border: 'none',
+              color: input.trim() && !loading ? '#fff' : '#A8A7A3',
               display: 'flex', alignItems: 'center', justifyContent: 'center',
-              fontSize: 16, padding: 0,
-              transition: 'background 0.15s, border-color 0.15s, color 0.15s',
+              fontSize: 17, fontWeight: 600, padding: 0,
+              transition: 'background 0.15s, color 0.15s',
               cursor: input.trim() && !loading ? 'pointer' : 'default',
             }}
           >
             {loading ? (
-              <span style={{ width: 14, height: 14, border: '2px solid rgba(255,255,255,0.3)', borderTopColor: '#fff', borderRadius: '50%', display: 'inline-block', animation: 'spin 0.7s linear infinite' }} />
-            ) : '↑'}
+              <span style={{ width: 14, height: 14, border: '2px solid rgba(255,255,255,0.4)', borderTopColor: '#fff', borderRadius: '50%', display: 'inline-block', animation: 'spin 0.7s linear infinite' }} />
+            ) : (
+              <svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M7.5 12V3M3 6.5l4.5-4.5 4.5 4.5"/>
+              </svg>
+            )}
           </button>
         </div>
       </div>
-      <div style={{ fontSize: 10, color: 'var(--hint)', textAlign: 'right', marginTop: 5 }}>
-        {listening ? '🔴 Listening… click ■ to stop' : 'Enter to send · Shift+Enter for new line · mic for voice'}
+      <div style={{ fontSize: 10, color: 'var(--hint)', textAlign: 'center', marginTop: 6 }}>
+        {listening ? '🔴 Listening… click ■ to stop' : 'Enter ↵ to send  ·  Shift+Enter for new line'}
       </div>
 
       <style>{`
