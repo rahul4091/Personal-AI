@@ -929,7 +929,7 @@ export default function SettingsPage({ user, onLogout, health = {} }) {
             { key: 'repo',  label: 'Default repository', hint: 'Just the repo name (not the full URL)', placeholder: 'my-repo', type: 'text' },
           ]}
         />
-        {webhookInfo && (
+        {webhookInfo && !webhookInfo.url.includes('localhost') && (
           <div style={{
             margin: '0 0 0 0', padding: '12px 20px 14px',
             background: 'var(--surface)', borderTop: '1px solid var(--border)',
