@@ -49,7 +49,7 @@ export default function ChatPanel({ onAction, health = {}, connected = false }) 
   const [input,      setInput]      = useState('');
   const [loading,    setLoading]    = useState(false);
   const [statusText, setStatusText] = useState('');
-  const [useAgent,   setUseAgent]   = useState(() => localStorage.getItem('devos_use_agent') === 'true');
+  const [useAgent,   setUseAgent]   = useState(() => localStorage.getItem('devos_use_agent') !== 'false');
   const [listening,  setListening]  = useState(false);
   const bottomRef      = useRef(null);
   const textareaRef    = useRef(null);
