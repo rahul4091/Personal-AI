@@ -317,7 +317,7 @@ const CREDENTIALS_TITLES = {
 };
 
 // Expanded panel layout matching Image #11
-function SetupPanel({ service, label, description, setupLinkLabel, setupLinkHref, credentialsTitle, credentialsSubtitle, children, onDisconnect, connected, testing, onSave, error }) {
+function SetupPanel({ service, label, description, setupLinkLabel, setupLinkHref, credentialsTitle, credentialsSubtitle, children, onDisconnect, connected, testing, onSave, error, warning, extraActions }) {
   return (
     <div>
       {/* ── Section 1: Setup Documentation ── */}
@@ -360,6 +360,7 @@ function SetupPanel({ service, label, description, setupLinkLabel, setupLinkHref
           style={{ padding: '7px 16px', fontSize: 13 }}>
           {testing ? 'Testing…' : 'Save & test'}
         </button>
+        {extraActions}
         {connected && onDisconnect && (
           <button onClick={onDisconnect}
             style={{ fontSize: 12, color: 'var(--danger)', background: 'transparent', border: 'none', cursor: 'pointer', padding: 0 }}>
@@ -368,6 +369,16 @@ function SetupPanel({ service, label, description, setupLinkLabel, setupLinkHref
         )}
       </div>
       <ErrorMsg msg={error} />
+      <WarnMsg msg={warning} />
+    </div>
+  );
+}
+
+function WarnMsg({ msg }) {
+  if (!msg) return null;
+  return (
+    <div style={{ marginTop: 8, fontSize: 12, color: '#7c4a00', background: '#fff8e1', padding: '7px 10px', borderRadius: 6, lineHeight: 1.5 }}>
+      {msg}
     </div>
   );
 }
@@ -383,7 +394,7 @@ function ErrorMsg({ msg }) {
 
 // ─── Single-key integration row (Gemini, Groq) ────────────────────────────────
 
-function SingleKeyRow({ service, label, description, linkText, linkHref, keyName, fieldLabel, fieldHint, saved, testing, onTest, onDisconnect, error }) {
+function SingleKeyRow({ service, label, description, linkText, linkHref, keyName, fieldLabel, fieldHint, saved, testing, onTest, onDisconnect, error, warning }) {
   const [value, setValue] = useState('');
   const [expanded, setExpanded] = useState(false);
   const keyMeta = saved?.[service]?.[keyName];
@@ -412,6 +423,7 @@ function SingleKeyRow({ service, label, description, linkText, linkHref, keyName
           onSave={handleTest}
           onDisconnect={connected && onDisconnect ? () => { onDisconnect(service); setExpanded(false); } : null}
           error={error}
+          warning={warning}
         >
           <FieldGroup label={fieldLabel} hint={fieldHint} value={value} onChange={setValue} />
         </SetupPanel>
@@ -422,7 +434,7 @@ function SingleKeyRow({ service, label, description, linkText, linkHref, keyName
 
 // ─── Multi-key integration row (Notion, GitHub, Trello, Slack, LinkedIn) ──────
 
-function MultiKeyRow({ service, label, description, fields: fieldDefs, saved, testing, onTest, onDisconnect, error, primaryKey }) {
+function MultiKeyRow({ service, label, description, fields: fieldDefs, saved, testing, onTest, onForceSave, onDisconnect, error, primaryKey }) {
   const [expanded, setExpanded] = useState(false);
   const [values, setValues] = useState({});
   const keyMeta = saved?.[service]?.[primaryKey];
@@ -435,8 +447,13 @@ function MultiKeyRow({ service, label, description, fields: fieldDefs, saved, te
     if (ok) { setExpanded(false); setValues({}); }
   }
 
-  // Find first field that has a linkHref for the "Get your key" link
+  async function handleForceSave() {
+    const ok = await onForceSave?.(service, values);
+    if (ok) { setExpanded(false); setValues({}); }
+  }
+
   const primaryField = fieldDefs[0];
+  const hasValues = Object.values(values).some(v => v?.trim());
 
   return (
     <>
@@ -456,6 +473,12 @@ function MultiKeyRow({ service, label, description, fields: fieldDefs, saved, te
           onSave={handleTest}
           onDisconnect={connected && onDisconnect ? () => { onDisconnect(service); setExpanded(false); } : null}
           error={error}
+          extraActions={onForceSave && error && hasValues ? (
+            <button onClick={handleForceSave} disabled={testing === service}
+              style={{ fontSize: 12, color: 'var(--muted)', background: 'transparent', border: '1px solid var(--border)', borderRadius: 6, padding: '5px 10px', cursor: 'pointer' }}>
+              Save anyway
+            </button>
+          ) : null}
         >
           {fieldDefs.map(f => (
             <FieldGroup
@@ -666,14 +689,18 @@ export default function SettingsPage({ user, onLogout, health = {} }) {
   const [saved,        setSaved]        = useState({});
   const [testing,      setTesting]      = useState(null);
   const [errors,       setErrors]       = useState({});
+  const [warnings,     setWarnings]     = useState({});
   const [googleConnected, setGoogleConnected] = useState(false);
   const [googleEmail,     setGoogleEmail]     = useState(null);
   const [googleError,  setGoogleError]  = useState(null);
   const [loading,      setLoading]      = useState(true);
+  const [webhookInfo,  setWebhookInfo]  = useState(null);
+  const [webhookCopied, setWebhookCopied] = useState(false);
 
   useEffect(() => {
     loadSaved();
     loadGoogleStatus();
+    loadWebhookInfo();
     if (window.location.search.includes('google_connected=true')) {
       window.history.replaceState({}, '', '/settings');
       loadGoogleStatus();
@@ -687,6 +714,13 @@ export default function SettingsPage({ user, onLogout, health = {} }) {
     } finally {
       setLoading(false);
     }
+  }
+
+  async function loadWebhookInfo() {
+    try {
+      const r = await apiFetch('/api/webhook/info');
+      if (r.ok) setWebhookInfo(await r.json());
+    } catch { /* ignore */ }
   }
 
   async function loadGoogleStatus() {
@@ -719,11 +753,37 @@ export default function SettingsPage({ user, onLogout, health = {} }) {
   async function testAndSave(service, payload) {
     setTesting(service);
     setErrors(e => ({ ...e, [service]: null }));
+    setWarnings(w => ({ ...w, [service]: null }));
     try {
       const r = await apiFetch(`/api/credentials/test/${service}`, { method: 'POST', body: JSON.stringify(payload) });
       const d = await r.json();
-      if (d.ok) { await loadSaved(); return true; }
-      else { setErrors(e => ({ ...e, [service]: d.error || 'Test failed' })); }
+      if (d.ok) {
+        await loadSaved();
+        if (d.warning) setWarnings(w => ({ ...w, [service]: d.warning }));
+        return true;
+      }
+      setErrors(e => ({ ...e, [service]: d.error || 'Test failed' }));
+    } catch (err) {
+      setErrors(e => ({ ...e, [service]: err.message }));
+    } finally {
+      setTesting(null);
+    }
+    return false;
+  }
+
+  async function forceSaveNotion(service, payload) {
+    setTesting(service);
+    setErrors(e => ({ ...e, [service]: null }));
+    setWarnings(w => ({ ...w, [service]: null }));
+    try {
+      const r = await apiFetch('/api/credentials/save/notion', { method: 'POST', body: JSON.stringify(payload) });
+      const d = await r.json();
+      if (d.ok) {
+        await loadSaved();
+        if (d.warning) setWarnings(w => ({ ...w, [service]: d.warning }));
+        return true;
+      }
+      setErrors(e => ({ ...e, [service]: d.error || 'Save failed' }));
     } catch (err) {
       setErrors(e => ({ ...e, [service]: err.message }));
     } finally {
@@ -793,6 +853,7 @@ export default function SettingsPage({ user, onLogout, health = {} }) {
           onTest={(svc, key) => testAndSave(svc, { key })}
           onDisconnect={disconnect}
           error={errors.gemini}
+          warning={warnings.gemini}
         />
         <RowDivider />
         <SingleKeyRow
@@ -831,9 +892,10 @@ export default function SettingsPage({ user, onLogout, health = {} }) {
           primaryKey="NOTION_API_KEY"
           saved={saved} testing={testing}
           onTest={(svc, v) => testAndSave(svc, { apiKey: v.apiKey, taskDbId: v.taskDbId, notesDbId: v.notesDbId })}
-          onDisconnect={disconnect} error={errors.notion}
+          onForceSave={(svc, v) => forceSaveNotion(svc, { apiKey: v.apiKey, taskDbId: v.taskDbId, notesDbId: v.notesDbId })}
+          onDisconnect={disconnect} error={errors.notion} warning={warnings.notion}
           fields={[
-            { key: 'apiKey',    label: 'Notion Integration Secret', hint: 'notion.so/my-integrations → New integration → copy secret', linkText: 'Open', linkHref: 'https://www.notion.so/my-integrations', placeholder: 'secret_ntn_…' },
+            { key: 'apiKey',    label: 'Notion Integration Secret', hint: 'app.notion.com/developers/connections → copy the Access token', linkText: 'Open', linkHref: 'https://www.notion.so/profile/integrations', placeholder: 'ntn_… or secret_ntn_…' },
             { key: 'taskDbId',  label: 'Tasks Database ID',  hint: 'Open the database in Notion — paste the full URL or just the 32-char ID from it', placeholder: 'URL or 32-char ID (optional)', type: 'text' },
             { key: 'notesDbId', label: 'Notes Database ID',  hint: 'Open the database in Notion — paste the full URL or just the 32-char ID from it', placeholder: 'URL or 32-char ID (optional)', type: 'text' },
           ]}
@@ -867,6 +929,46 @@ export default function SettingsPage({ user, onLogout, health = {} }) {
             { key: 'repo',  label: 'Default repository', hint: 'Just the repo name (not the full URL)', placeholder: 'my-repo', type: 'text' },
           ]}
         />
+        {webhookInfo && (
+          <div style={{
+            margin: '0 0 0 0', padding: '12px 20px 14px',
+            background: 'var(--surface)', borderTop: '1px solid var(--border)',
+          }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>
+              GitHub Webhook URL
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <code style={{
+                flex: 1, fontSize: 11, padding: '5px 10px',
+                background: 'var(--bg)', border: '1px solid var(--border)',
+                borderRadius: 'var(--radius-sm)', color: 'var(--text)',
+                overflowX: 'auto', whiteSpace: 'nowrap', display: 'block',
+              }}>
+                {webhookInfo.url}
+              </code>
+              <button
+                onClick={() => {
+                  navigator.clipboard.writeText(webhookInfo.url);
+                  setWebhookCopied(true);
+                  setTimeout(() => setWebhookCopied(false), 2000);
+                }}
+                style={{
+                  padding: '5px 12px', fontSize: 11, fontWeight: 600,
+                  border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                  background: webhookCopied ? '#22c55e22' : 'var(--bg)',
+                  color: webhookCopied ? '#22c55e' : 'var(--text-muted)',
+                  cursor: 'pointer', flexShrink: 0, transition: 'all .15s',
+                }}
+              >
+                {webhookCopied ? 'Copied!' : 'Copy'}
+              </button>
+            </div>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6 }}>
+              Paste this URL in your GitHub repo → Settings → Webhooks.
+              {webhookInfo.secret ? ' Webhook secret is configured.' : ' Set GITHUB_WEBHOOK_SECRET in .env for HMAC verification.'}
+            </div>
+          </div>
+        )}
         <RowDivider />
         <MultiKeyRow
           service="trello" label="Trello"

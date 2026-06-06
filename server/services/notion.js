@@ -63,7 +63,7 @@ export async function createTask(title, status = 'Not started', creds = {}) {
     });
     return { id: page.id, title, status, url: page.url };
   } catch (err) {
-    if (err.code === 'unauthorized') throw new Error('Notion API token is invalid or expired — update NOTION_API_KEY in .env');
+    if (err.code === 'unauthorized') throw new Error('Notion API token is invalid or expired — update it in Settings → Notion');
     console.error('[notion] createTask:', err.message);
     throw err;
   }
@@ -120,7 +120,7 @@ export async function createNote(title, body = '', creds = {}) {
     });
     return { id: page.id, title, url: page.url };
   } catch (err) {
-    if (err.code === 'unauthorized') throw new Error('Notion API token is invalid or expired — update NOTION_API_KEY in .env');
+    if (err.code === 'unauthorized') throw new Error('Notion API token is invalid or expired — update it in Settings → Notion');
     console.error('[notion] createNote:', err.message);
     throw err;
   }
@@ -151,4 +151,83 @@ export async function deleteTask(pageId, creds = {}) {
   }
 }
 
-export default { getTasks, createTask, updateTaskStatus, updateTask, deleteTask, getNotes, createNote };
+// ─── Markdown export ─────────────────────────────────────────────────────────
+
+function richTextToMd(richText = []) {
+  return richText.map(t => {
+    let s = t.plain_text ?? '';
+    if (t.annotations?.bold)          s = `**${s}**`;
+    if (t.annotations?.italic)        s = `*${s}*`;
+    if (t.annotations?.code)          s = `\`${s}\``;
+    if (t.annotations?.strikethrough) s = `~~${s}~~`;
+    if (t.href)                        s = `[${s}](${t.href})`;
+    return s;
+  }).join('');
+}
+
+function blockToMd(block, counters = {}) {
+  const type = block.type;
+  const b    = block[type] ?? {};
+  const text = richTextToMd(b.rich_text ?? []);
+
+  switch (type) {
+    case 'heading_1':         return `# ${text}`;
+    case 'heading_2':         return `## ${text}`;
+    case 'heading_3':         return `### ${text}`;
+    case 'paragraph':         return text || '';
+    case 'bulleted_list_item':return `- ${text}`;
+    case 'numbered_list_item':{
+      counters[type] = (counters[type] ?? 0) + 1;
+      return `${counters[type]}. ${text}`;
+    }
+    case 'to_do':             return `- [${b.checked ? 'x' : ' '}] ${text}`;
+    case 'quote':             return `> ${text}`;
+    case 'code':              return `\`\`\`${b.language ?? ''}\n${text}\n\`\`\``;
+    case 'divider':           return '---';
+    case 'callout':           return `> **${richTextToMd(b.icon ? [] : [])}** ${text}`;
+    case 'toggle':            return `- ${text}`;
+    case 'image': {
+      const url = b.type === 'external' ? b.external?.url : b.file?.url;
+      return url ? `![image](${url})` : '';
+    }
+    default: return text || '';
+  }
+}
+
+async function getPageBlocks(pageId, notion) {
+  const blocks = [];
+  let cursor;
+  do {
+    const res = await notion.blocks.children.list({
+      block_id: pageId,
+      start_cursor: cursor,
+      page_size: 100,
+    });
+    blocks.push(...res.results);
+    cursor = res.has_more ? res.next_cursor : undefined;
+  } while (cursor);
+  return blocks;
+}
+
+export async function exportNotesAsMarkdown(creds = {}) {
+  const n = getClient(creds);
+  const notes = await getNotes(creds);
+  const files = [];
+
+  for (const note of notes) {
+    try {
+      const blocks  = await getPageBlocks(note.id, n);
+      const counters = {};
+      const body    = blocks.map(b => blockToMd(b, counters)).filter(Boolean).join('\n\n');
+      const md      = `# ${note.title}\n\n> Source: ${note.url}\n\n${body}`;
+      const slug    = note.title.replace(/[^a-z0-9]+/gi, '-').toLowerCase().slice(0, 60) || note.id;
+      files.push({ name: `${slug}.md`, content: md });
+    } catch (err) {
+      console.error(`[notion] export failed for "${note.title}":`, err.message);
+      files.push({ name: `${note.id}.md`, content: `# ${note.title}\n\n*Export failed: ${err.message}*` });
+    }
+  }
+  return files;
+}
+
+export default { getTasks, createTask, updateTaskStatus, updateTask, deleteTask, getNotes, createNote, exportNotesAsMarkdown };

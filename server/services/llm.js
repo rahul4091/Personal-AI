@@ -34,7 +34,7 @@ const MODELS = {
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-function resolveKey(provider, apiKeys = {}) {
+export function resolveKey(provider, apiKeys = {}) {
   if (provider === 'gemini') return apiKeys.GEMINI_API_KEY || process.env.GEMINI_API_KEY || null;
   if (provider === 'groq')   return apiKeys.GROQ_API_KEY   || process.env.GROQ_API_KEY   || null;
   return null;

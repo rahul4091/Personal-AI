@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { apiFetch } from './api.js';
+import { ToastContainer } from './toast.jsx';
 import ChatPanel       from './components/ChatPanel.jsx';
 import EmailPanel      from './components/EmailPanel.jsx';
 import CalendarPanel   from './components/CalendarPanel.jsx';
@@ -27,7 +28,11 @@ const navItems = [
 ];
 
 export default function App() {
-  const [view,           setView]           = useState('digest');
+  const VALID_VIEWS = new Set(navItems.map(n => n.id));
+  const [view, setView] = useState(() => {
+    const saved = localStorage.getItem('devos_view');
+    return saved && VALID_VIEWS.has(saved) ? saved : 'digest';
+  });
   const [connected,      setConnected]      = useState(false);
   const [health,         setHealth]         = useState({});
   const [taskRefreshKey,     setTaskRefreshKey]     = useState(0);
@@ -39,11 +44,11 @@ export default function App() {
   const [user,           setUser]           = useState(null);
   const [authChecked,    setAuthChecked]    = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(false);
-  const [isLoggedIn,     setIsLoggedIn]     = useState(false);
+
+  const isLoggedIn = !!user;
 
   function handleAuth(newUser, isSignup) {
     setUser(newUser);
-    setIsLoggedIn(true);
     if (isSignup) {
       localStorage.setItem('devos_onboarding', 'true');
       setShowOnboarding(true);
@@ -59,16 +64,16 @@ export default function App() {
     localStorage.removeItem('devos_token');
     localStorage.removeItem('devos_onboarding');
     setUser(null);
-    setIsLoggedIn(false);
   }
 
   async function handleConnectGoogle() {
     try {
       const r = await apiFetch('/api/auth/google/init');
       if (r.status === 401) { handleLogout(); return; }
-      const data = await r.json();
+      let data;
+      try { data = await r.json(); } catch { return; }
       if (data.url) window.location.href = data.url;
-    } catch { /* network error — silently ignore */ }
+    } catch { /* network error */ }
   }
 
   function fetchHealth() {
@@ -80,6 +85,7 @@ export default function App() {
 
   function handleViewChange(newView) {
     if (view === 'settings') fetchHealth();
+    localStorage.setItem('devos_view', newView);
     setView(newView);
   }
 
@@ -136,15 +142,21 @@ export default function App() {
     const token = localStorage.getItem('devos_token');
     if (token) {
       fetch('/api/users/me', { headers: { Authorization: `Bearer ${token}` } })
-        .then(r => r.ok ? r.json() : null)
+        .then(async r => {
+          if (r.ok) return r.json();
+          // Only clear the token on 401 (invalid/expired token).
+          // 502/503 means the server is restarting — keep the token so the
+          // user stays logged in once the server comes back up.
+          if (r.status === 401) {
+            localStorage.removeItem('devos_token');
+            localStorage.removeItem('devos_onboarding');
+          }
+          return null;
+        })
         .then(u => {
           if (u) {
             setUser(u);
-            setIsLoggedIn(true);
             if (localStorage.getItem('devos_onboarding') === 'true') setShowOnboarding(true);
-          } else {
-            localStorage.removeItem('devos_token');
-            localStorage.removeItem('devos_onboarding');
           }
           setAuthChecked(true);
         })
@@ -160,24 +172,13 @@ export default function App() {
       window.history.replaceState({}, '', '/');
       fetch('/api/users/me', { headers: { Authorization: `Bearer ${googleToken}` } })
         .then(r => r.ok ? r.json() : null)
-        .then(u => { if (u) { setUser(u); setIsLoggedIn(true); setAuthChecked(true); } })
+        .then(u => { if (u) { setUser(u); setAuthChecked(true); } })
         .catch(() => {});
-      // Fetch health with the new token so connected state updates immediately
-      fetch('/api/health', { headers: { Authorization: `Bearer ${googleToken}` } })
-        .then(r => r.json())
-        .then(d => { setHealth(d); setConnected(d.google); })
-        .catch(() => {});
+      fetchHealth();
       return;
     }
 
-    // Always pass the token — health endpoint requires auth
-    const storedToken = localStorage.getItem('devos_token');
-    if (storedToken) {
-      fetch('/api/health', { headers: { Authorization: `Bearer ${storedToken}` } })
-        .then(r => r.json())
-        .then(d => { setHealth(d); setConnected(d.google); })
-        .catch(() => {});
-    }
+    if (localStorage.getItem('devos_token')) fetchHealth();
 
     if (window.location.search.includes('connected=true')) {
       setConnected(true);
@@ -203,6 +204,7 @@ export default function App() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden' }}>
+      <ToastContainer />
       <TopBar
         connected={connected}
         health={health}
@@ -213,11 +215,11 @@ export default function App() {
       />
       <NavBar view={view} setView={handleViewChange} navItems={navItems} />
 
-      <main style={{ flex: 1, overflow: 'auto', padding: '28px 40px' }}>
+      <main style={{ flex: 1, overflow: view === 'tasks' ? 'hidden' : 'auto', padding: view === 'tasks' ? '20px 24px' : '28px 40px', display: 'flex', flexDirection: 'column' }}>
         <div style={{ display: view === 'digest'   ? 'block' : 'none' }}><DigestPanel refreshKey={digestRefreshKey} onGoToSettings={() => handleViewChange('settings')} /></div>
         <div style={{ display: view === 'comms'    ? 'block' : 'none' }}><EmailPanel connected={connected} refreshKey={emailRefreshKey} onConnectGoogle={handleConnectGoogle} onGoToSettings={() => handleViewChange('settings')} /></div>
         <div style={{ display: view === 'calendar' ? 'block' : 'none' }}><CalendarPanel connected={connected} refreshKey={calendarRefreshKey} onConnectGoogle={handleConnectGoogle} onGoToSettings={() => handleViewChange('settings')} /></div>
-        <div style={{ display: view === 'tasks'    ? 'block' : 'none' }}><TaskPanel refreshKey={taskRefreshKey} onGoToSettings={() => handleViewChange('settings')} /></div>
+        <div style={{ display: view === 'tasks' ? 'flex' : 'none', flexDirection: 'column', height: '100%' }}><TaskPanel refreshKey={taskRefreshKey} onGoToSettings={() => handleViewChange('settings')} /></div>
         <div style={{ display: view === 'github'   ? 'block' : 'none' }}><GitHubPanel health={health} refreshKey={githubRefreshKey} onGoToSettings={() => handleViewChange('settings')} /></div>
         <div style={{ display: view === 'linkedin' ? 'block' : 'none' }}><LinkedInPanel health={health} /></div>
         <div style={{ display: view === 'slack'    ? 'block' : 'none' }}><SlackPanel health={health} onGoToSettings={() => handleViewChange('settings')} /></div>

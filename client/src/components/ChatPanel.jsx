@@ -1,4 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
+import { apiFetch } from '../api.js';
+import { toast } from '../toast.jsx';
 
 const STORAGE_KEY = 'devos_chat_history';
 
@@ -48,8 +50,41 @@ export default function ChatPanel({ onAction, health = {}, connected = false }) 
   const [loading,    setLoading]    = useState(false);
   const [statusText, setStatusText] = useState('');
   const [useAgent,   setUseAgent]   = useState(() => localStorage.getItem('devos_use_agent') === 'true');
-  const bottomRef   = useRef(null);
-  const textareaRef = useRef(null);
+  const [listening,  setListening]  = useState(false);
+  const bottomRef      = useRef(null);
+  const textareaRef    = useRef(null);
+  const recognitionRef = useRef(null);
+
+  const SpeechRecognition = typeof window !== 'undefined' &&
+    (window.SpeechRecognition || window.webkitSpeechRecognition);
+
+  function toggleListening() {
+    if (!SpeechRecognition) {
+      toast('Voice input is not supported in this browser', 'error');
+      return;
+    }
+    if (listening) {
+      recognitionRef.current?.stop();
+      return;
+    }
+    const rec = new SpeechRecognition();
+    rec.continuous = false;
+    rec.interimResults = true;
+    rec.lang = 'en-US';
+    recognitionRef.current = rec;
+
+    rec.onstart  = () => setListening(true);
+    rec.onend    = () => setListening(false);
+    rec.onerror  = e => {
+      setListening(false);
+      if (e.error !== 'aborted') toast('Mic error: ' + e.error, 'error');
+    };
+    rec.onresult = e => {
+      const transcript = Array.from(e.results).map(r => r[0].transcript).join('');
+      setInput(transcript);
+    };
+    rec.start();
+  }
 
   function toggleAgent() {
     setUseAgent(v => { localStorage.setItem('devos_use_agent', String(!v)); return !v; });
@@ -86,10 +121,9 @@ export default function ChatPanel({ onAction, health = {}, connected = false }) 
     if (useAgent) {
       setStatusText('Agent thinking…');
       try {
-        const r = await fetch('/api/chat/agent', {
-          method:  'POST',
-          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-          body:    JSON.stringify({ message: text, history: messages.slice(-12) }),
+        const r = await apiFetch('/api/chat/agent', {
+          method: 'POST',
+          body:   JSON.stringify({ message: text, history: messages.slice(-12) }),
         });
         const data = await r.json();
         if (!r.ok) throw new Error(data.error ?? 'Server error');
@@ -186,11 +220,7 @@ export default function ChatPanel({ onAction, health = {}, connected = false }) 
     setMessages([]);
     localStorage.removeItem(STORAGE_KEY);
     // Also wipe the server-side rolling summary so the agent starts fresh
-    const token = localStorage.getItem('devos_token');
-    fetch('/api/chat/agent/clear', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
-    }).catch(() => {});
+    apiFetch('/api/chat/agent/clear', { method: 'POST' }).catch(() => {});
   }
 
   const isEmpty = messages.length === 0;
@@ -456,7 +486,34 @@ export default function ChatPanel({ onAction, health = {}, connected = false }) 
             maxHeight: 160,
           }}
         />
-        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4, flexShrink: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+          {/* Mic button */}
+          <button
+            onClick={toggleListening}
+            title={listening ? 'Stop listening' : 'Voice input'}
+            style={{
+              width: 34, height: 34, borderRadius: 10, padding: 0,
+              border: `1px solid ${listening ? '#D85A30' : 'var(--border)'}`,
+              background: listening ? '#fff3f0' : 'transparent',
+              color: listening ? '#D85A30' : 'var(--hint)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              cursor: 'pointer',
+              transition: 'all 0.15s',
+            }}
+          >
+            {listening ? (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                <rect x="6" y="6" width="12" height="12" rx="2"/>
+              </svg>
+            ) : (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                <rect x="9" y="2" width="6" height="11" rx="3"/>
+                <path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="8" y1="22" x2="16" y2="22"/>
+              </svg>
+            )}
+          </button>
+
+          {/* Send button */}
           <button
             onClick={send}
             disabled={loading || !input.trim()}
@@ -479,7 +536,7 @@ export default function ChatPanel({ onAction, health = {}, connected = false }) 
         </div>
       </div>
       <div style={{ fontSize: 10, color: 'var(--hint)', textAlign: 'right', marginTop: 5 }}>
-        Enter to send · Shift+Enter for new line
+        {listening ? '🔴 Listening… click ■ to stop' : 'Enter to send · Shift+Enter for new line · mic for voice'}
       </div>
 
       <style>{`

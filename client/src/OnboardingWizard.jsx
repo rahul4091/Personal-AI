@@ -12,7 +12,7 @@ export default function OnboardingWizard({ user, onComplete }) {
 
   // If returning from Google OAuth redirect, jump straight to the done step.
   useEffect(() => {
-    if (window.location.search.includes('connected=true')) {
+    if (new URLSearchParams(window.location.search).get('connected') === 'true') {
       window.history.replaceState({}, '', '/');
       setStep(STEPS.length - 1);
     }

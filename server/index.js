@@ -153,6 +153,10 @@ app.get('/api/auth/google/callback', async (req, res) => {
     // ── Connect Google to an existing logged-in account ───────────────────────
     const uidMatch = stateStr.match(/uid:(\d+)/);
     const userId   = uidMatch ? parseInt(uidMatch[1], 10) : null;
+    if (!userId) {
+      console.error('[auth/google/callback] missing uid in OAuth state — cannot save tokens');
+      return res.redirect(`${frontendURL}/?auth_error=google_failed`);
+    }
     await auth.saveTokens(tokens, userId);
     const fromSettings = stateStr.includes('from:settings');
     res.redirect(`${frontendURL}${fromSettings ? '/settings?google_connected=true' : '/?connected=true'}`);
@@ -323,7 +327,13 @@ app.post('/api/credentials/test/:service', requireAuth, async (req, res) => {
             max_tokens: 10,
           });
         } catch (apiErr) {
-          const msg = apiErr?.error?.error?.message || apiErr?.message || 'Gemini API request failed';
+          const status = apiErr?.status ?? apiErr?.response?.status;
+          // 429 = rate-limited but key is valid — save it with a notice
+          if (status === 429) {
+            await integrations.saveKey(uid, 'gemini', 'GEMINI_API_KEY', geminiKey);
+            return res.json({ ok: true, warning: 'Key saved. Gemini is rate-limited right now (free-tier quota). It will work once the limit resets.' });
+          }
+          const msg = apiErr?.error?.message || apiErr?.error?.error?.message || apiErr?.message || 'Gemini API request failed';
           return res.status(400).json({ ok: false, error: `Gemini: ${msg}` });
         }
         await integrations.saveKey(uid, 'gemini', 'GEMINI_API_KEY', geminiKey);
@@ -353,27 +363,39 @@ app.post('/api/credentials/test/:service', requireAuth, async (req, res) => {
       }
 
       case 'notion': {
-        const notionKey = sanitizeKey(body.apiKey);
+        // Strip ALL whitespace — Notion's UI wraps long tokens and copy-paste
+        // can introduce embedded newlines that trim() misses.
+        const notionKey = sanitizeKey(body.apiKey).replace(/\s+/g, '');
         const { taskDbId, notesDbId } = body;
         console.log(`[notion/test] received key prefix="${notionKey.slice(0, 15)}" len=${notionKey.length}`);
         if (!notionKey) return res.status(400).json({ ok: false, error: 'API key is required' });
-        if (!notionKey.startsWith('secret_') && !notionKey.startsWith('ntn_')) {
-          return res.status(400).json({ ok: false, error: `Wrong key format — server received "${notionKey.slice(0, 12)}…" (${notionKey.length} chars). Notion integration secrets start with secret_ or ntn_. Go to notion.so/my-integrations → open your integration → copy the Internal Integration Secret.` });
+        // Notion now issues tokens as bare `ntn_…` — the old `secret_ntn_…` format wraps the same
+        // value with a `secret_` prefix that their API no longer needs. Strip it if present.
+        const cleanKey = notionKey.startsWith('secret_ntn_') ? notionKey.slice('secret_'.length) : notionKey;
+        if (!cleanKey.startsWith('ntn_') && !cleanKey.startsWith('secret_')) {
+          return res.status(400).json({ ok: false, error: `Wrong key format — received "${notionKey.slice(0, 12)}…". Copy the Access token from app.notion.com/developers/connections — it starts with ntn_` });
         }
-        const meResp = await fetch('https://api.notion.com/v1/users/me', {
-          headers: { 'Authorization': `Bearer ${notionKey}`, 'Notion-Version': '2022-06-28' },
+        // Use /search (POST) — more reliable than /users/me for new secret_ntn_ tokens
+        const meResp = await fetch('https://api.notion.com/v1/search', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${cleanKey}`,
+            'Notion-Version': '2022-06-28',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ page_size: 1 }),
         });
-        console.log(`[notion/test] Notion /users/me status=${meResp.status}`);
+        console.log(`[notion/test] Notion /search status=${meResp.status}`);
         if (!meResp.ok) {
           const e = await meResp.json().catch(() => ({}));
           console.error('[notion/test] Notion error:', e);
-          const diag = `Server received: "${notionKey.slice(0, 12)}…" (${notionKey.length} chars). `;
-          const hint = e.code === 'unauthorized'
-            ? 'Notion rejected the token. It may have been regenerated or belongs to a deleted integration. Go to notion.so/my-integrations → open your integration → copy the latest secret.'
+          const diag = `Server received: "${cleanKey.slice(0, 12)}…" (${cleanKey.length} chars). `;
+          const hint = e.code === 'unauthorized' || meResp.status === 401
+            ? 'Notion says the token is invalid. Try: notion.so/profile/integrations (new URL) or notion.so/my-integrations → open your integration → click "Show" next to the secret → copy it fresh. If this keeps failing, use "Save anyway" below.'
             : `Notion error: ${e.message || meResp.status}`;
           return res.status(400).json({ ok: false, error: diag + hint });
         }
-        const notionUser = await meResp.json();
+        const notionUser = { name: 'Integration' }; // /search doesn't return user info, that's fine
         // Extract plain 32-char ID from a full Notion URL if the user pasted a URL
         const resolvedTaskId  = extractNotionId(taskDbId);
         const resolvedNotesId = extractNotionId(notesDbId);
@@ -381,7 +403,7 @@ app.post('/api/credentials/test/:service', requireAuth, async (req, res) => {
         for (const [label, dbId] of [['Tasks', resolvedTaskId], ['Notes', resolvedNotesId]]) {
           if (!dbId) continue;
           const dbResp = await fetch(`https://api.notion.com/v1/databases/${dbId}`, {
-            headers: { 'Authorization': `Bearer ${notionKey}`, 'Notion-Version': '2022-06-28' },
+            headers: { 'Authorization': `Bearer ${cleanKey}`, 'Notion-Version': '2022-06-28' },
           });
           if (!dbResp.ok) {
             const e = await dbResp.json().catch(() => ({}));
@@ -392,7 +414,7 @@ app.post('/api/credentials/test/:service', requireAuth, async (req, res) => {
           }
         }
         // All passed — save
-        await integrations.saveKey(uid, 'notion', 'NOTION_API_KEY', notionKey);
+        await integrations.saveKey(uid, 'notion', 'NOTION_API_KEY', cleanKey);
         if (resolvedTaskId)  await integrations.saveKey(uid, 'notion', 'NOTION_TASKS_DB_ID',  resolvedTaskId);
         if (resolvedNotesId) await integrations.saveKey(uid, 'notion', 'NOTION_NOTES_DB_ID', resolvedNotesId);
         return res.json({ ok: true, meta: { userName: notionUser.name } });
@@ -501,6 +523,24 @@ app.post('/api/credentials/test/:service', requireAuth, async (req, res) => {
   } catch (err) {
     console.error(`[credentials/test/${service}]`, err.message);
     return res.status(400).json({ ok: false, error: err.message });
+  }
+});
+
+// ─── Save without testing (Notion bypass for persistent 401 issues) ──────────────
+app.post('/api/credentials/save/notion', requireAuth, async (req, res) => {
+  try {
+    const uid = req.user.userId;
+    const raw         = sanitizeKey(req.body.apiKey ?? '').replace(/\s+/g, '');
+    const notionKey   = raw.startsWith('secret_ntn_') ? raw.slice('secret_'.length) : raw;
+    const taskDbId    = extractNotionId(req.body.taskDbId  ?? '');
+    const notesDbId   = extractNotionId(req.body.notesDbId ?? '');
+    if (!notionKey) return res.status(400).json({ ok: false, error: 'API key is required' });
+    await integrations.saveKey(uid, 'notion', 'NOTION_API_KEY', notionKey);
+    if (taskDbId)  await integrations.saveKey(uid, 'notion', 'NOTION_TASKS_DB_ID',  taskDbId);
+    if (notesDbId) await integrations.saveKey(uid, 'notion', 'NOTION_NOTES_DB_ID', notesDbId);
+    res.json({ ok: true, warning: 'Saved without verifying — if Notion features stay empty, the token or database IDs may be wrong.' });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
   }
 });
 
@@ -1177,6 +1217,28 @@ async function getUserCreds(userId) {
   return integrations.getUserCredentials(userId).catch(() => ({}));
 }
 
+// ─── Trello board (lists + cards) ─────────────────────────────────────────────
+app.get('/api/trello/board', requireAuth, async (req, res) => {
+  try {
+    const creds = await getUserCreds(req.user.userId);
+    if (!(creds.TRELLO_API_KEY && creds.TRELLO_TOKEN && creds.TRELLO_BOARD_ID))
+      return res.json({ lists: [], cards: [] });
+    const [lists, cards] = await Promise.all([trello.getLists(creds), trello.getCards(creds)]);
+    res.json({ lists: lists ?? [], cards: cards ?? [] });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/trello/move', requireAuth, async (req, res) => {
+  try {
+    const creds = await getUserCreds(req.user.userId);
+    const { cardId, listId } = req.body;
+    if (!cardId || !listId) return res.status(400).json({ error: 'cardId and listId required' });
+    const result = await trello.moveCard(cardId, listId, creds);
+    if (!result) return res.status(500).json({ error: 'Trello move failed' });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/api/tasks', requireAuth, async (req, res) => {
   try {
     const creds = await getUserCreds(req.user.userId);
@@ -1212,7 +1274,33 @@ app.post('/api/tasks', requireAuth, async (req, res) => {
 app.get('/api/notes', requireAuth, async (req, res) => {
   try {
     const creds = await getUserCreds(req.user.userId);
+    if (!notionReady(creds)) return res.status(404).json({ error: 'Notion not configured' });
     res.json(await notion.getNotes(creds));
+  } catch(e){ res.status(500).json({error:e.message}) }
+});
+
+app.post('/api/notes', requireAuth, async (req, res) => {
+  try {
+    const creds = await getUserCreds(req.user.userId);
+    if (!notionReady(creds)) return res.status(400).json({ error: 'Notion not configured — add your API key in Settings' });
+    const { title, body = '' } = req.body;
+    if (!title?.trim()) return res.status(400).json({ error: 'title is required' });
+    const note = await notion.createNote(title.trim(), body, creds);
+    res.json(note);
+  } catch(e){ res.status(500).json({error:e.message}) }
+});
+
+// Export all Notion notes as a zip of .md files
+app.get('/api/notes/export', requireAuth, async (req, res) => {
+  try {
+    const creds = await getUserCreds(req.user.userId);
+    if (!notionReady(creds)) return res.status(400).json({ error: 'Notion not configured' });
+    const files = await notion.exportNotesAsMarkdown(creds);
+
+    // Build a zip manually using a simple concatenation format clients can handle,
+    // or just return newline-delimited JSON so the frontend can zip in the browser.
+    // We return JSON; the client zips + downloads.
+    res.json({ files });
   } catch(e){ res.status(500).json({error:e.message}) }
 });
 const _emailCache = new Map(); // uid → { data, at }
@@ -1439,30 +1527,135 @@ app.post('/api/content/approve', requireAuth, async (req, res) => {
 
 // ─── Webhook endpoints ────────────────────────────────────────────────────────
 
+// Find the first user who has Slack configured (for webhook notifications)
+async function findSlackUser() {
+  // Try Google-connected users first (most likely to have all integrations)
+  for (const uid of auth.getConnectedUserIds()) {
+    const c = await getUserCreds(Number(uid));
+    if (c.SLACK_BOT_TOKEN && c.SLACK_USER_ID) return c;
+  }
+  return null;
+}
+
+// Return webhook endpoint URL for display in Settings
+app.get('/api/webhook/info', requireAuth, (req, res) => {
+  const base = process.env.RAILWAY_PUBLIC_DOMAIN
+    ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+    : `http://localhost:${PORT}`;
+  res.json({
+    url:    `${base}/api/webhook/github`,
+    secret: !!process.env.GITHUB_WEBHOOK_SECRET,
+  });
+});
+
 app.post('/api/webhook/github', async (req, res) => {
+  // Verify HMAC-SHA256 signature when secret is set
   const secret = process.env.GITHUB_WEBHOOK_SECRET;
   if (secret) {
-    const sig     = req.headers['x-hub-signature-256'] ?? '';
-    const payload = JSON.stringify(req.body);
-    const expected = 'sha256=' + crypto.createHmac('sha256', secret).update(payload).digest('hex');
-    const sigBuf = Buffer.from(sig);
-    const expBuf = Buffer.from(expected);
+    const sig      = req.headers['x-hub-signature-256'] ?? '';
+    const expected = 'sha256=' + crypto.createHmac('sha256', secret).update(JSON.stringify(req.body)).digest('hex');
+    const sigBuf   = Buffer.from(sig);
+    const expBuf   = Buffer.from(expected);
     if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
       return res.status(401).json({ error: 'invalid signature' });
     }
   }
-  res.json({ ok: true }); // acknowledge immediately
+
+  res.json({ ok: true }); // acknowledge immediately before async work
+
   const event = req.headers['x-github-event'];
   const body  = req.body;
 
   try {
-    if (event === 'pull_request' && body.action === 'opened') {
-      const pr    = body.pull_request;
-      const stale = await github.scanStalePRs(3);
-      if (stale.length) {
-        await slack.sendAlert('Stale PRs detected', stale.map(p => `#${p.id} ${p.title} (${p.daysStale}d)`).join('\n'));
+    const creds = await findSlackUser();
+    if (!creds) return; // no Slack configured, nothing to notify
+
+    // ── pull_request ────────────────────────────────────────────────────────
+    if (event === 'pull_request') {
+      const pr     = body.pull_request;
+      const repo   = body.repository?.full_name ?? '';
+      const author = pr.user?.login ?? 'unknown';
+      const url    = pr.html_url ?? '';
+      const title  = pr.title ?? 'Untitled PR';
+      const num    = pr.number;
+
+      if (body.action === 'opened') {
+        await slack.sendDM(
+          `:arrow_heading_up: *New PR opened* in \`${repo}\`\n` +
+          `*#${num} — ${title}*\nBy: @${author}\n${url}`,
+          creds,
+        );
+      } else if (body.action === 'closed' && pr.merged) {
+        await slack.sendDM(
+          `:merged: *PR merged* in \`${repo}\`\n` +
+          `*#${num} — ${title}*\nMerged by: @${body.sender?.login ?? author}\n${url}`,
+          creds,
+        );
+      } else if (body.action === 'closed' && !pr.merged) {
+        await slack.sendDM(
+          `:x: *PR closed (unmerged)* in \`${repo}\`\n` +
+          `*#${num} — ${title}*\n${url}`,
+          creds,
+        );
+      } else if (body.action === 'review_requested') {
+        const reviewer = body.requested_reviewer?.login ?? 'someone';
+        await slack.sendDM(
+          `:eyes: *Review requested* on PR #${num} in \`${repo}\`\n` +
+          `*${title}*\nReviewer: @${reviewer}\n${url}`,
+          creds,
+        );
       }
     }
+
+    // ── push to default branch ───────────────────────────────────────────────
+    if (event === 'push') {
+      const ref     = body.ref ?? '';
+      const branch  = ref.replace('refs/heads/', '');
+      const repo    = body.repository?.full_name ?? '';
+      const def     = body.repository?.default_branch ?? 'main';
+      if (branch === def) {
+        const commits = (body.commits ?? []).slice(0, 3);
+        const lines   = commits.map(c => `• ${c.message.split('\n')[0]} — @${c.author?.username ?? 'unknown'}`).join('\n');
+        const more    = (body.commits?.length ?? 0) > 3 ? `\n+${body.commits.length - 3} more` : '';
+        await slack.sendDM(
+          `:git: *Push to \`${branch}\`* in \`${repo}\`\n${lines}${more}`,
+          creds,
+        );
+      }
+    }
+
+    // ── issues ───────────────────────────────────────────────────────────────
+    if (event === 'issues') {
+      const issue  = body.issue;
+      const repo   = body.repository?.full_name ?? '';
+      const author = issue.user?.login ?? 'unknown';
+      const url    = issue.html_url ?? '';
+      const title  = issue.title ?? 'Untitled issue';
+      const num    = issue.number;
+
+      if (body.action === 'opened') {
+        await slack.sendDM(
+          `:bug: *New issue #${num}* in \`${repo}\`\n*${title}*\nBy: @${author}\n${url}`,
+          creds,
+        );
+      } else if (body.action === 'closed') {
+        await slack.sendDM(
+          `:white_check_mark: *Issue #${num} closed* in \`${repo}\`\n*${title}*\n${url}`,
+          creds,
+        );
+      }
+    }
+
+    // ── release published ────────────────────────────────────────────────────
+    if (event === 'release' && body.action === 'published') {
+      const rel  = body.release;
+      const repo = body.repository?.full_name ?? '';
+      await slack.sendDM(
+        `:rocket: *Release published* in \`${repo}\`\n*${rel.name || rel.tag_name}*\n${rel.html_url}`,
+        creds,
+      );
+    }
+
   } catch (err) {
     console.error('[webhook/github]', err.message);
   }
@@ -1628,9 +1821,16 @@ async function migrateEnvCredentials() {
   let count = 0;
   for (const [service, keyName, value] of candidates) {
     if (!value) continue;
+    // Strip the legacy secret_ prefix Notion prepended to ntn_ tokens — Notion's API rejects
+    // the prefixed form with 401, so we must normalise before storing.
+    const clean = (keyName === 'NOTION_API_KEY' && value.startsWith('secret_ntn_'))
+      ? value.slice('secret_'.length)
+      : value;
     const existing = await integrations.getKey(adminUser.id, service, keyName).catch(() => null);
-    if (!existing) {
-      await integrations.saveKey(adminUser.id, service, keyName, value);
+    // Also fix already-migrated keys that were saved with the bad prefix
+    const needsFix = existing?.startsWith('secret_ntn_');
+    if (!existing || needsFix) {
+      await integrations.saveKey(adminUser.id, service, keyName, clean);
       count++;
     }
   }
@@ -1702,14 +1902,32 @@ async function migrateJsonIntegrations() {
     const keys = oldInteg.filter(r => String(r.userId) === String(oldUser.id));
     for (const k of keys) {
       try {
-        await pool.query(
-          `INSERT INTO user_integrations (user_id, service, key_name, key_value)
-           VALUES ($1, $2, $3, $4)
-           ON CONFLICT (user_id, service, key_name) DO NOTHING`,
-          [newId, k.service, k.keyName, k.keyValue]
-        );
+        // Try current key first; fall back to the hardcoded dev fallback used
+        // before ENCRYPTION_SECRET was set, so a one-time secret rotation
+        // doesn't lose data stored in the JSON file.
+        let plain;
+        try {
+          plain = decrypt(k.keyValue);
+        } catch {
+          const fallbackKey = crypto.scryptSync(
+            'devos-local-dev-fallback-do-not-use-in-prod', 'devos-aes-salt-v1', 32
+          );
+          const [ivB64, tagB64, bodyB64] = k.keyValue.split(':');
+          const decipher = crypto.createDecipheriv(
+            'aes-256-gcm',
+            fallbackKey,
+            Buffer.from(ivB64, 'base64url')
+          );
+          decipher.setAuthTag(Buffer.from(tagB64, 'base64url'));
+          plain = Buffer.concat([
+            decipher.update(Buffer.from(bodyB64, 'base64url')),
+            decipher.final(),
+          ]).toString('utf8');
+        }
+        // Re-save through saveKey() so the value is encrypted with the current secret.
+        await integrations.saveKey(newId, k.service, k.keyName, plain);
         keysMigrated++;
-      } catch { /* skip corrupted rows */ }
+      } catch { /* skip rows that can't be decrypted either way */ }
     }
   }
 

@@ -73,6 +73,7 @@ export async function deleteUser(userId, password) {
   if (!user) throw new Error('User not found');
   const fullUser = await dbFindByUsername(user.username);
   const hash = fullUser.password_hash ?? fullUser.passwordHash;
+  if (hash === 'GOOGLE_AUTH_ONLY') throw new Error('This account uses Google sign-in — no password to verify. Contact support to delete it.');
   const ok = await bcrypt.compare(password, hash);
   if (!ok) throw new Error('Password is incorrect');
   await dbDeleteUser(userId);

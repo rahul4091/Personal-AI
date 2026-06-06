@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useCache } from '../hooks/useCache.js';
 import { apiFetch } from '../api.js';
 import NotConnected from './NotConnected.jsx';
+import { toast } from '../toast.jsx';
 
 const TTL_30MIN = 30 * 60 * 1000;
 
@@ -53,6 +54,98 @@ function EmailIframe({ html }) {
   );
 }
 
+// ─── Inline reply draft ───────────────────────────────────────────────────────
+
+function ReplyDraft({ email, toAddr, onSent }) {
+  const [text,    setText]    = useState(email.draftReply || '');
+  const [open,    setOpen]    = useState(false);
+  const [sending, setSending] = useState(false);
+
+  async function send() {
+    if (!text.trim()) return;
+    setSending(true);
+    try {
+      const r = await apiFetch('/api/email/approve-draft', {
+        method: 'POST',
+        body: JSON.stringify({
+          to:       toAddr,
+          subject:  'Re: ' + email.subject,
+          original: email.draftReply,
+          edited:   text,
+        }),
+      });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        throw new Error(d.error || 'Send failed');
+      }
+      toast('Reply sent to ' + toAddr, 'success');
+      onSent(email.id);
+    } catch (e) {
+      toast(e.message, 'error');
+    } finally {
+      setSending(false);
+    }
+  }
+
+  if (!email.draftReply) return null;
+
+  return (
+    <div style={{ borderTop: '0.5px solid var(--border)', background: '#f8fffe', padding: '12px 20px 14px' }}>
+      {!open ? (
+        <button
+          onClick={() => setOpen(true)}
+          style={{
+            fontSize: 12, color: '#1D9E75', fontWeight: 500,
+            background: 'none', border: '1px solid #1D9E75',
+            borderRadius: 6, padding: '5px 12px', cursor: 'pointer',
+            display: 'flex', alignItems: 'center', gap: 6,
+          }}
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+            <polyline points="9,17 4,12 9,7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/>
+          </svg>
+          AI draft ready — click to review &amp; send
+        </button>
+      ) : (
+        <div>
+          <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 6 }}>
+            Reply to <strong>{toAddr}</strong> · Re: {email.subject}
+          </div>
+          <textarea
+            value={text}
+            onChange={e => setText(e.target.value)}
+            rows={4}
+            style={{
+              width: '100%', fontSize: 13, lineHeight: 1.6,
+              border: '1px solid var(--border)', borderRadius: 6,
+              padding: '8px 10px', fontFamily: 'inherit', resize: 'vertical',
+              background: '#fff', color: 'var(--text)',
+            }}
+          />
+          <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+            <button
+              onClick={send}
+              disabled={sending || !text.trim()}
+              className="primary"
+              style={{ fontSize: 12, padding: '6px 14px' }}
+            >
+              {sending ? 'Sending…' : 'Send reply'}
+            </button>
+            <button
+              onClick={() => setOpen(false)}
+              style={{ fontSize: 12, padding: '6px 10px' }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Main panel ───────────────────────────────────────────────────────────────
+
 export default function EmailPanel({ connected, refreshKey, onConnectGoogle, onGoToSettings }) {
   const [emails,     setEmails]     = useState([]);
   const [loading,    setLoading]    = useState(false);
@@ -90,7 +183,8 @@ export default function EmailPanel({ connected, refreshKey, onConnectGoogle, onG
       const r    = await apiFetch('/api/emails');
       if (r.status === 401) {
         const body = await r.json().catch(() => ({}));
-        if (body.error === 'google_auth_required') { setAuthError(true); return; }
+        if (body.error === 'google_auth_required') setAuthError(true);
+        return;
       }
       const data = await r.json();
       const list = Array.isArray(data) ? data : [];
@@ -119,6 +213,8 @@ export default function EmailPanel({ connected, refreshKey, onConnectGoogle, onG
       if (r.ok) {
         const data = await r.json();
         setFullEmails(f => ({ ...f, [id]: data }));
+      } else {
+        toast('Could not load email body', 'error');
       }
     } finally {
       setFetching(f => ({ ...f, [id]: false }));
@@ -126,13 +222,15 @@ export default function EmailPanel({ connected, refreshKey, onConnectGoogle, onG
   }
 
   async function archive(id, e) {
-    e.stopPropagation();
-    await apiFetch('/api/email/archive', {
-      method: 'POST',
-      body: JSON.stringify({ id }),
-    });
+    e?.stopPropagation();
+    await apiFetch('/api/email/archive', { method: 'POST', body: JSON.stringify({ id }) });
     setEmails(prev => prev.filter(x => x.id !== id));
     if (openId === id) setOpenId(null);
+  }
+
+  function onReplySent(id) {
+    // archive after sending so it leaves the triage view
+    archive(id);
   }
 
   const priorityColor = p => p === 'P1' ? 'var(--danger)' : p === 'P2' ? 'var(--warning)' : 'var(--hint)';
@@ -282,6 +380,9 @@ export default function EmailPanel({ connected, refreshKey, onConnectGoogle, onG
                     </pre>
                   )}
                 </div>
+
+                {/* AI reply draft */}
+                <ReplyDraft email={email} toAddr={addr || email.from} onSent={onReplySent} />
 
                 {/* Action bar */}
                 <div style={{

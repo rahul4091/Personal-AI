@@ -13,21 +13,23 @@ import { createAgent, tool, HumanMessage, AIMessage } from 'langchain';
 import { ChatGroq } from '@langchain/groq';
 import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
 import { z } from 'zod';
+import { resolveKey } from './llm.js';
 
-// Prefer Groq's 70B (reliable tool calling); fall back to Gemini.
-// Notes that matter for tool calling:
-//   • the 8B model mangles tool-call syntax — use 70B-versatile
-//   • temperature 0 stops Llama from leaking the built-in <function=…> text format
-function pickModel(apiKeys = {}) {
-  const groqKey = apiKeys.GROQ_API_KEY || process.env.GROQ_API_KEY;
-  if (groqKey) return new ChatGroq({ model: 'llama-3.3-70b-versatile', apiKey: groqKey, maxTokens: 800, temperature: 0 });
-
-  const geminiKey = apiKeys.GEMINI_API_KEY || process.env.GEMINI_API_KEY;
-  if (geminiKey) return new ChatGoogleGenerativeAI({ model: 'gemini-2.0-flash', apiKey: geminiKey, maxOutputTokens: 800, temperature: 0 });
-
-  const err = new Error('No LLM API key configured — add a Groq or Gemini key in Settings.');
-  err.code = 'MISSING_API_KEY';
-  throw err;
+// Returns an ordered list of model factories to try for tool calling.
+// Gemini first (reliable tool-call JSON); Groq as fallback (useful when Gemini
+// quota is exhausted). runAgent tries each in sequence until one succeeds.
+function modelCandidates(apiKeys = {}) {
+  const candidates = [];
+  const geminiKey = resolveKey('gemini', apiKeys);
+  const groqKey   = resolveKey('groq',   apiKeys);
+  if (geminiKey) candidates.push(() => new ChatGoogleGenerativeAI({ model: 'gemini-2.0-flash', apiKey: geminiKey, maxOutputTokens: 1200, temperature: 0 }));
+  if (groqKey)   candidates.push(() => new ChatGroq({ model: 'llama-3.3-70b-versatile', apiKey: groqKey, maxTokens: 800, temperature: 0 }));
+  if (!candidates.length) {
+    const err = new Error('No LLM API key configured — add a Groq or Gemini key in Settings.');
+    err.code = 'MISSING_API_KEY';
+    throw err;
+  }
+  return candidates;
 }
 
 // Build the tool set, closing over the per-request executeAction + creds + user.
@@ -89,12 +91,16 @@ function buildTools({ executeAction, message, creds, userId }) {
   ];
 }
 
-const SYSTEM_PROMPT = (connectedTools, memContext) =>
-  `You are DevOS, a personal AI command-centre agent. ` +
-  `Today is ${new Date().toDateString()}. Connected tools: ${connectedTools || 'none yet'}. ` +
-  `Use the available tools to fetch real data or perform actions — never invent events, tasks, emails, PRs, or names. ` +
-  `If a tool returns an empty list, say so plainly. Keep replies concise and direct.` +
-  (memContext ? ` User context: ${memContext}` : '');
+const SYSTEM_PROMPT = (connectedTools, memContext) => {
+  const today = new Date().toDateString();
+  return (
+    `You are DevOS, a personal AI command-centre agent. ` +
+    `Today is ${today}. Connected tools: ${connectedTools || 'none yet'}. ` +
+    `Use the available tools to fetch real data or perform actions — never invent events, tasks, emails, PRs, or names. ` +
+    `If a tool returns an empty list, say so plainly. Keep replies concise and direct.` +
+    (memContext ? ` User context: ${memContext}` : '')
+  );
+};
 
 const WINDOW = 6; // full messages kept per turn
 
@@ -164,25 +170,56 @@ async function buildContext(history, userId, model) {
  * @returns {{ reply: string, toolsUsed: string[] }}
  */
 export async function runAgent({ message, history = [], creds = {}, userId, executeAction, connectedTools = '', memContext = '' }) {
-  const apiKeys = { GEMINI_API_KEY: creds.GEMINI_API_KEY, GROQ_API_KEY: creds.GROQ_API_KEY };
-  const model   = pickModel(apiKeys);
-  const tools   = buildTools({ executeAction, message, creds, userId });
+  const apiKeys    = { GEMINI_API_KEY: creds.GEMINI_API_KEY, GROQ_API_KEY: creds.GROQ_API_KEY };
+  const candidates = modelCandidates(apiKeys);
+  const tools      = buildTools({ executeAction, message, creds, userId });
+  const systemPrompt = SYSTEM_PROMPT(connectedTools, memContext);
 
-  const agent = createAgent({ model, tools, prompt: SYSTEM_PROMPT(connectedTools, memContext) });
+  // tool_use_failed is intermittent on Groq — retry same model up to 2× before moving on
+  const MAX_TOOL_RETRIES = 2;
 
-  const contextMsgs = await buildContext(history, userId, model);
-  const messages    = [...contextMsgs, new HumanMessage(message)];
+  let lastErr;
+  outer: for (const makeModel of candidates) {
+    for (let attempt = 0; attempt <= MAX_TOOL_RETRIES; attempt++) {
+      const model = makeModel();
+      try {
+        const agent       = createAgent({ model, tools, systemPrompt });
+        const contextMsgs = await buildContext(history, userId, model);
+        const messages    = [...contextMsgs, new HumanMessage(message)];
 
-  const result = await agent.invoke(
-    { messages },
-    { runName: 'devos-agent', tags: ['devos', 'agent'], metadata: { userId: String(userId ?? 'anon') } }
-  );
-  const msgs     = result.messages ?? [];
-  const last     = msgs[msgs.length - 1];
-  const reply    = last ? (typeof last.content === 'string' ? last.content : JSON.stringify(last.content)) : '';
-  const toolsUsed = msgs.flatMap(m => (m.tool_calls ?? []).map(tc => tc.name));
+        const result    = await agent.invoke(
+          { messages },
+          { runName: 'devos-agent', tags: ['devos', 'agent'], metadata: { userId: String(userId ?? 'anon') } }
+        );
+        const msgs      = result.messages ?? [];
+        const last      = msgs[msgs.length - 1];
+        const reply     = last ? (typeof last.content === 'string' ? last.content : JSON.stringify(last.content)) : '';
+        const toolsUsed = msgs.flatMap(m => (m.tool_calls ?? []).map(tc => tc.name));
+        return { reply, toolsUsed };
+      } catch (err) {
+        lastErr = err;
+        const isToolFmt = err.message?.includes('tool_use_failed') || err.message?.includes('failed_generation');
+        const isQuota   = err.message?.includes('429') || err.message?.includes('quota') || err.message?.includes('rate');
 
-  return { reply, toolsUsed };
+        if (isToolFmt && attempt < MAX_TOOL_RETRIES) {
+          console.warn(`[agent] tool_use_failed (attempt ${attempt + 1}/${MAX_TOOL_RETRIES + 1}) — retrying same model`);
+          continue; // retry inner loop with same model
+        }
+        // quota, tool format exhausted, or any other provider error → try next model
+        console.warn(`[agent] ${model.constructor?.name ?? 'model'} failed — trying next (${err.message.slice(0, 60)})`);
+        continue outer; // jump to next candidate, skipping remaining attempts
+      }
+    }
+  }
+
+  // All candidates exhausted — surface a readable message
+  const raw = lastErr?.message ?? 'Unknown error';
+  const friendly = raw.includes('tool_use_failed') || raw.includes('failed_generation')
+    ? 'The AI model failed to call a tool correctly. Turn Agent OFF and try again, or wait and retry.'
+    : raw.includes('quota') || raw.includes('429') || raw.includes('rate')
+    ? 'All AI keys are currently rate-limited. Wait a minute then try again.'
+    : raw;
+  throw new Error(friendly);
 }
 
 /** Clear the rolling summary for a user (called when they hit "Clear" in the chat). */
@@ -190,4 +227,4 @@ export function clearMemory(userId) {
   rollingMemory.delete(String(userId));
 }
 
-export default { runAgent };
+export default { runAgent, clearMemory };
