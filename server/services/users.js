@@ -5,10 +5,14 @@ import { dbCreateUser, dbFindByUsername, dbFindById, dbUpdateEmail, dbUpdatePass
 
 export { dbFindByGoogleId, dbFindByEmail, dbLinkGoogleId, dbCreateGoogleUser };
 
-const JWT_SECRET = process.env.JWT_SECRET ?? (() => {
-  console.warn('[auth] JWT_SECRET not set — tokens will invalidate on server restart');
-  return Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
-})();
+const _jwtFallback = Math.random().toString(36).slice(2) + Date.now().toString(36);
+if (!process.env.JWT_SECRET) {
+  console.warn('[auth] JWT_SECRET not set — using temporary secret; tokens will invalidate on restart');
+}
+
+function getJwtSecret() {
+  return process.env.JWT_SECRET || _jwtFallback;
+}
 
 const SALT_ROUNDS = 12;
 
@@ -44,11 +48,11 @@ export async function loginUser(username, password) {
 }
 
 export function signToken(user) {
-  return jwt.sign({ userId: user.id, username: user.username }, JWT_SECRET, { expiresIn: '90d' });
+  return jwt.sign({ userId: user.id, username: user.username }, getJwtSecret(), { expiresIn: '90d' });
 }
 
 export function verifyToken(token) {
-  return jwt.verify(token, JWT_SECRET);
+  return jwt.verify(token, getJwtSecret());
 }
 
 export async function getUserById(id) {
