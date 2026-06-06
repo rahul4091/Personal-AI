@@ -1,9 +1,20 @@
 import { useState, useEffect } from 'react';
 import { apiFetch } from '../api.js';
 
-export default function DigestPanel({ refreshKey, onGoToSettings }) {
+export default function DigestPanel({ refreshKey, onGoToSettings, health = {}, connected = false }) {
   const [digest,  setDigest]  = useState(null);
   const [loading, setLoading] = useState(false);
+
+  // Count how many integrations this user has connected
+  const connectedCount = [
+    connected,                  // Google
+    health.notion,
+    health.todoist,
+    health.github,
+    health.slack,
+    health.trello,
+    health.gemini || health.groq,
+  ].filter(Boolean).length;
 
   useEffect(() => {
     apiFetch('/api/digest/latest')
@@ -55,18 +66,49 @@ export default function DigestPanel({ refreshKey, onGoToSettings }) {
         </button>
       </div>
 
-      {!digest && !loading && (
-        <div style={{ textAlign: 'center', padding: '60px 0', color: 'var(--muted)' }}>
+      {!digest && !loading && connectedCount < 2 && (
+        <div style={{
+          border: '1px dashed var(--border)', borderRadius: 'var(--radius)',
+          padding: '36px 32px', textAlign: 'center',
+        }}>
+          <div style={{ fontSize: 32, marginBottom: 12 }}>🔌</div>
+          <div style={{ fontWeight: 600, fontSize: 15, marginBottom: 8 }}>Connect more tools to unlock the digest</div>
+          <p style={{ fontSize: 13, color: 'var(--text-muted)', lineHeight: 1.7, maxWidth: 360, margin: '0 auto 20px' }}>
+            The digest needs at least 2 integrations — like Google + Notion, or GitHub + Todoist — to give you a useful summary.
+            You have <strong>{connectedCount}</strong> connected right now.
+          </p>
+          <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'center', gap: 8, marginBottom: 24 }}>
+            {[
+              { label: 'Google', hint: 'Gmail & Calendar', done: connected },
+              { label: 'Notion / Todoist', hint: 'Tasks & notes', done: health.notion || health.todoist },
+              { label: 'GitHub', hint: 'PRs & issues', done: health.github },
+              { label: 'Slack', hint: 'Team messages', done: health.slack },
+            ].map(t => (
+              <div key={t.label} style={{
+                display: 'flex', alignItems: 'center', gap: 6,
+                padding: '6px 12px', borderRadius: 20,
+                background: t.done ? 'rgba(29,158,117,0.08)' : 'var(--surface)',
+                border: `1px solid ${t.done ? 'var(--accent)' : 'var(--border)'}`,
+                fontSize: 12, color: t.done ? 'var(--accent)' : 'var(--text-muted)',
+              }}>
+                <span>{t.done ? '✓' : '○'}</span>
+                <span style={{ fontWeight: t.done ? 600 : 400 }}>{t.label}</span>
+              </div>
+            ))}
+          </div>
+          <button className="primary" onClick={onGoToSettings}
+            style={{ padding: '9px 20px', fontSize: 13 }}>
+            Add integrations in Settings →
+          </button>
+        </div>
+      )}
+
+      {!digest && !loading && connectedCount >= 2 && (
+        <div style={{ textAlign: 'center', padding: '60px 0', color: 'var(--text-muted)' }}>
           <p style={{ fontSize: 14, marginBottom: 8 }}>No digest yet for today</p>
           <p style={{ fontSize: 12, marginBottom: 16 }}>
-            Connect your tools first, then click "Run digest" to get a summary of emails, calendar, tasks, and code activity.
+            Click "Run digest" to get a summary of your emails, calendar, tasks, and code activity.
           </p>
-          <button
-            onClick={onGoToSettings}
-            style={{ fontSize: 12, color: 'var(--accent)', background: 'none', border: 'none', cursor: 'pointer', padding: 0, textDecoration: 'underline' }}
-          >
-            Go to Settings to connect your tools →
-          </button>
         </div>
       )}
 

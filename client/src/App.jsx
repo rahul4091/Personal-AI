@@ -216,7 +216,7 @@ export default function App() {
       <NavBar view={view} setView={handleViewChange} navItems={navItems} />
 
       <main style={{ flex: 1, overflow: view === 'tasks' ? 'hidden' : 'auto', padding: view === 'tasks' ? '20px 24px' : '28px 40px', display: 'flex', flexDirection: 'column' }}>
-        <div style={{ display: view === 'digest'   ? 'block' : 'none' }}><DigestPanel refreshKey={digestRefreshKey} onGoToSettings={() => handleViewChange('settings')} /></div>
+        <div style={{ display: view === 'digest'   ? 'block' : 'none' }}><DigestPanel health={health} connected={connected} refreshKey={digestRefreshKey} onGoToSettings={() => handleViewChange('settings')} /></div>
         <div style={{ display: view === 'comms'    ? 'block' : 'none' }}><EmailPanel connected={connected} refreshKey={emailRefreshKey} onConnectGoogle={handleConnectGoogle} onGoToSettings={() => handleViewChange('settings')} /></div>
         <div style={{ display: view === 'calendar' ? 'block' : 'none' }}><CalendarPanel connected={connected} refreshKey={calendarRefreshKey} onConnectGoogle={handleConnectGoogle} onGoToSettings={() => handleViewChange('settings')} /></div>
         <div style={{ display: view === 'tasks' ? 'flex' : 'none', flexDirection: 'column', height: '100%' }}><TaskPanel refreshKey={taskRefreshKey} onGoToSettings={() => handleViewChange('settings')} /></div>
